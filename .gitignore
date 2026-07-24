@@ -1,0 +1,21 @@
+# Go
+*.so
+*.exe
+go.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+artifacts/
+dist/
+build/
+
+# PaperValet clone (from CI)
+/tmp/PaperValet/

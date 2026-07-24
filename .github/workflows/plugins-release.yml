@@ -1,0 +1,101 @@
+name: Build External Plugins
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'plugins-external/**'
+  workflow_dispatch:
+    inputs:
+      plugin:
+        description: 'Specific plugin to build (empty = all)'
+        required: false
+        type: string
+
+jobs:
+  list-plugins:
+    runs-on: ubuntu-latest
+    outputs:
+      dirs: ${{ steps.set.outputs.dirs }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: List plugin directories
+        id: set
+        run: |
+          dirs=()
+          for d in plugins-external/*/; do
+            name=$(basename "$d")
+            if [ -f "$d/main.go" ]; then
+              dirs+=("$d")
+            fi
+          done
+          echo "dirs=$(printf '%s\n' "${dirs[@]}" | jq -R . | jq -s .)" >> $GITHUB_OUTPUT
+
+  build-plugins:
+    needs: list-plugins
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin-dir: ${{ fromJson(needs.list-plugins.outputs.dirs) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: false
+
+      - name: Setup PaperValet (for replace directive)
+        run: |
+          git clone --depth 1 https://github.com/TiaraBasori/PaperValet /tmp/PaperValet
+
+      - name: Extract plugin name
+        id: meta
+        run: |
+          name=$(basename "${{ matrix.plugin-dir }}")
+          echo "name=$name" >> $GITHUB_OUTPUT
+
+      - name: Build plugin
+        working-directory: ${{ matrix.plugin-dir }}
+        run: |
+          go mod tidy
+          go build -buildmode=plugin -o ../../${{ steps.meta.outputs.name }}.so .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.name }}
+          path: ${{ steps.meta.outputs.name }}.so
+
+  release:
+    needs: build-plugins
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: '*.so'
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: 'Latest External Plugins'
+          body: |
+            Auto-built external plugins for PaperValet.
+            Install with: `ppm install <plugin-name>`
+          files: artifacts/**/*.so
+          draft: false
+          prerelease: false
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
