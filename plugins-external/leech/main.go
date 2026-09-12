@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	
 	"time"
 
 	"github.com/TiaraBasori/PaperValet/pkg/plugin"

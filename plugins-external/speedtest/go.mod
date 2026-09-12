@@ -1,4 +1,4 @@
-module github.com/TiaraBasori/PaperValet-Plugins/plugins-external/speedtest
+module github.com/TiaraBasori/PaperValet-Plugins/speedtest
 
 go 1.25.0
 
@@ -14,4 +14,4 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 )
 
-replace github.com/TiaraBasori/PaperValet => ../../../PaperValet
+replace github.com/TiaraBasori/PaperValet => ../..
