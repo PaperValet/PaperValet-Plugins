@@ -8,7 +8,9 @@ import (
 	"github.com/TiaraBasori/PaperValet/pkg/plugin"
 )
 
-type TPMPlugin struct{}
+type TPMPlugin struct {
+	mgr plugin.Manager
+}
 
 func New() (plugin.Plugin, error) {
 	return &TPMPlugin{}, nil
@@ -26,6 +28,7 @@ func (p *TPMPlugin) Name() string        { return "tpm" }
 func (p *TPMPlugin) Description() string { return "Telegram插件管理器" }
 
 func (p *TPMPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
+	p.mgr = mgr
 	cmds := []*plugin.Command{
 		{
 			Name:        "tpm",
@@ -99,7 +102,7 @@ func (p *TPMPlugin) handleTPM(ctx *plugin.CommandContext) error {
 }
 
 func (p *TPMPlugin) listPlugins(ctx *plugin.CommandContext) error {
-	infos := ctx.Manager().GetAllInfo()
+	infos := p.mgr.GetAllInfo()
 	
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("📦 <b>已加载插件 (%d)</b>\n\n", len(infos)))
@@ -109,11 +112,7 @@ func (p *TPMPlugin) listPlugins(ctx *plugin.CommandContext) error {
 		if info.Status == plugin.StatusActive {
 			status = "✅"
 		}
-		b.WriteString(fmt.Sprintf("%s <b>%s</b> v%s — %s\n", status, info.Name, info.Version, info.Description))
-		if info.Author != "" {
-			b.WriteString(fmt.Sprintf("   作者: %s\n", info.Author))
-		}
-		b.WriteString("\n")
+		b.WriteString(fmt.Sprintf("%s <b>%s</b> — %s\n", status, info.Name, info.Description))
 	}
 
 	b.WriteString("💡 使用 <code>.tpm [install|remove|enable|disable]</code> 管理插件")
@@ -121,7 +120,7 @@ func (p *TPMPlugin) listPlugins(ctx *plugin.CommandContext) error {
 }
 
 func (p *TPMPlugin) showHelp(ctx *plugin.CommandContext) error {
-	prefix := ctx.Prefix()
+	prefix := "."
 	return ctx.Edit(fmt.Sprintf(`📦 <b>TPM - Telegram插件管理器</b>
 
 <b>用法:</b>
@@ -139,7 +138,7 @@ func (p *TPMPlugin) showHelp(ctx *plugin.CommandContext) error {
 • <code>%stpm enable ping</code>
 • <code>%stpm update</code>
 
-💡 <i>插件以 .so 文件形式存放在 plugins/ 目录</i>`, prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix))
+💡 <i>插件以 .so 文件形式存放在 plugins/ 目录</i>`, prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix))
 }
 
 func (p *TPMPlugin) Start(ctx context.Context) error { return nil }

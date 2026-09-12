@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"strconv"
-	"strings"
+	
 
 	"github.com/TiaraBasori/PaperValet/pkg/plugin"
-	"github.com/gotd/td/tg"
+	
 )
 
 type RePlugin struct{}
@@ -39,7 +39,7 @@ func (p *RePlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 }
 
 func (p *RePlugin) handleRe(ctx *plugin.CommandContext) error {
-	msg := ctx.Message()
+	msg := ctx.Message
 	if msg == nil {
 		return ctx.Edit("❌ 无消息上下文")
 	}
@@ -72,7 +72,7 @@ func (p *RePlugin) handleRe(ctx *plugin.CommandContext) error {
 	}
 
 	// Get the API client
-	client := ctx.API()
+	client := ctx.API
 	if client == nil {
 		return ctx.Edit("❌ 客户端不可用")
 	}
