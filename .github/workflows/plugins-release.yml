@@ -5,6 +5,7 @@ on:
     branches: [main, master]
     paths:
       - 'plugins-external/**'
+      - '.github/workflows/plugins-release.yml'
   workflow_dispatch:
     inputs:
       plugin:
@@ -23,16 +24,20 @@ jobs:
 
       - name: List plugin directories
         id: set
+        env:
+          REQUESTED_PLUGIN: ${{ inputs.plugin }}
         run: |
+          set -euo pipefail
           dirs=()
           for d in plugins-external/*/; do
             name=$(basename "$d")
-            if [ -f "$d/main.go" ]; then
+            if [ -f "$d/main.go" ] && { [ -z "$REQUESTED_PLUGIN" ] || [ "$name" = "$REQUESTED_PLUGIN" ]; }; then
               dirs+=("$d")
             fi
           done
           if [ ${#dirs[@]} -eq 0 ]; then
-            echo "dirs=[]" >> $GITHUB_OUTPUT
+            echo "No plugins match the requested filter" >&2
+            exit 1
           else
             echo "dirs=$(printf '%s\n' "${dirs[@]}" | jq -R . | jq -s -c .)" >> $GITHUB_OUTPUT
           fi
@@ -56,7 +61,7 @@ jobs:
 
       - name: Setup PaperValet (for replace directive)
         run: |
-          git clone --depth 1 https://github.com/TiaraBasori/PaperValet /tmp/PaperValet
+          git clone --depth 1 https://github.com/PaperValet/PaperValet "$GITHUB_WORKSPACE/../PaperValet"
 
       - name: Extract plugin name
         id: meta
@@ -67,18 +72,20 @@ jobs:
       - name: Build plugin
         working-directory: ${{ matrix.plugin-dir }}
         run: |
-          go mod tidy
+          go test ./...
+          go vet ./...
           go build -buildmode=plugin -o ../../${{ steps.meta.outputs.name }}.so .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.meta.outputs.name }}
+          name: plugin-${{ steps.meta.outputs.name }}
+          if-no-files-found: error
           path: ${{ steps.meta.outputs.name }}.so
 
   release:
     needs: build-plugins
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && inputs.plugin == ''
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -87,7 +94,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: '*.so'
+          pattern: 'plugin-*'
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
