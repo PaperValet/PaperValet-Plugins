@@ -96,7 +96,7 @@ jobs:
           name: 'Latest External Plugins'
           body: |
             Auto-built external plugins for PaperValet.
-            Install with: `ppm install <plugin-name>`
+            Install with: `apt install <plugin-name>`
           files: artifacts/**/*.so
           draft: false
           prerelease: false
