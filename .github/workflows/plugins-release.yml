@@ -72,6 +72,7 @@ jobs:
       - name: Build plugin
         working-directory: ${{ matrix.plugin-dir }}
         run: |
+          go mod tidy
           go test ./...
           go vet ./...
           go build -buildmode=plugin -o ../../${{ steps.meta.outputs.name }}.so .
