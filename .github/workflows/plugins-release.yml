@@ -31,7 +31,11 @@ jobs:
               dirs+=("$d")
             fi
           done
-          echo "dirs=$(printf '%s\n' "${dirs[@]}" | jq -R . | jq -s .)" >> $GITHUB_OUTPUT
+          if [ ${#dirs[@]} -eq 0 ]; then
+            echo "dirs=[]" >> $GITHUB_OUTPUT
+          else
+            echo "dirs=$(printf '%s\n' "${dirs[@]}" | jq -R . | jq -s -c .)" >> $GITHUB_OUTPUT
+          fi
 
   build-plugins:
     needs: list-plugins
