@@ -231,8 +231,10 @@ func (p *SavePlugin) resolveTarget(ctx *plugin.CommandContext, target string) (t
 	return ctx.PeerResolver.ResolveFromChatID(ctx.Context(), id)
 }
 
-// SavePlugin forwards messages to a configurable target, bypassing
-// forward restrictions via direct API calls.
+// forwardMessage saves message IDs from sourceChat and sends them to the target.
+func (p *SavePlugin) forwardMessage(ctx *plugin.CommandContext, targetOverride string, sourceChatID int64, ids []int) error {
+	return p.saveMessage(ctx, targetOverride, sourceChatID, ids)
+}
 func (p *SavePlugin) saveMessage(ctx *plugin.CommandContext, targetOverride string, sourceChatID int64, ids []int) error {
 	userID := fmt.Sprintf("%d", ctx.Message.UserID)
 	config := p.getUserConfig(userID)
@@ -359,7 +361,7 @@ func (p *SavePlugin) handleLinks(ctx *plugin.CommandContext, args []string) erro
 		if lo > hi {
 			lo, hi = hi, lo
 		}
-		if hi-lo > 100 {
+		if hi-lo >= 100 {
 			return ctx.Edit("❌ 范围过大，最多 100 条")
 		}
 		peer, err := p.resolveLinkPeer(ctx, links[0])
@@ -375,15 +377,21 @@ func (p *SavePlugin) handleLinks(ctx *plugin.CommandContext, args []string) erro
 
 	// Single / batch mode.
 	sent := 0
+	var failures []string
 	for _, l := range links {
 		peer, err := p.resolveLinkPeer(ctx, l)
 		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", argLabel(l), err))
 			continue
 		}
 		if err := p.forwardFromPeer(ctx, "", peer, []int{l.msgID}); err != nil {
-			return err
+			failures = append(failures, fmt.Sprintf("%s: %v", argLabel(l), err))
+			continue
 		}
 		sent++
+	}
+	if len(failures) > 0 {
+		return ctx.Edit(fmt.Sprintf("⚠️ 已转发 %d 条，失败 %d 条\n%s", sent, len(failures), strings.Join(failures, "\n")))
 	}
 	if sent == 0 {
 		return ctx.Edit("❌ 没有链接转发成功")

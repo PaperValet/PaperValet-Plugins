@@ -1,87 +1,78 @@
 # PaperValet-Plugins
 
-PaperValet 外部插件仓库 - Go 插件包管理器 (PPM) 专用
+PaperValet 外部插件仓库 — 所有第三方插件源码统一维护在这里，主仓库不存放插件源码。
 
-## 插件列表
+## 内置插件（编译进主程序，不在本仓库）
 
-### 内建插件 (编译进二进制)
 | 插件 | 命令 | 说明 |
 |------|------|------|
-| core | version/uptime/ping | 核心功能 |
-| ppm | ppm | 插件包管理器 |
+| core | version/ping/restart | 核心命令 |
 | help | help | 帮助系统 |
-| admin | restart/shutdown/gc | 管理命令 |
-| prefix | prefix | 多前缀管理 |
-| cron | cron | 定时任务 |
-| kitt | kitt | 高级触发器 (匹配→执行) |
-| health | health/memory | health/memory | 内存守护 (自动 GC/重载/重启) |
-| autofix | autofix | 一键修复 (git 同步+重启) |
-| loglevel | loglevel | 运行时日志级别调整 |
-| sendlog | sendlog | 发送日志到收藏夹 |
-| save | save | 突破限制保存/转发消息 |
-| leech | leech | 消息归档抓取 |
-| ids | ids | 显示 ID 及跳转链接 |
-| encode | encode | 编码/解码工具 |
-| qr | qr | 二维码生成 |
-| gt | gt | 谷歌翻译 |
-| bizhi | bizhi | 随机壁纸 |
-| weather | weather | 天气查询 |
-| calc | calc | 计算器 |
-| hitokoto | hitokoto | 随机一言 |
-| rev | rev | 文本反转 |
-| sendat | sendat | 定时发送 |
-| isalive | isalive | 存活检测 |
-| atadmins | atadmins | 艾特全体管理员 |
+| status | status | 运行状态 |
+| apt | apt | 插件包管理器 |
+| info | info/fwd | 信息查询与转发 |
+| alias | alias | 命令别名 |
+| exec | exec | 执行系统命令 |
+| sudo | sudo | 权限委派 |
+| reload | reload | 外部插件热重载 |
+| log | loglevel/sendlog | 日志级别与发送 |
+| prefix | prefix | 前缀管理 |
+| backup | backup | 备份与恢复 |
+| update | update/autofix | 代码同步与修复 |
+| dme | dme/dme all | 消息清理 |
+| lang | lang | 语言切换 |
 
-### 外部插件 (动态加载 .so)
+## 外部插件（动态加载 .so）
 
-| 插件 | 命令 | 说明 | PPM 安装 |
+| 插件 | 命令 | 说明 | 安装 |
 |------|------|------|----------|
-| atadmins | atadmins | 一键艾特全部管理员 | `ppm install atadmins` |
-| ids | ids | 显示用户/群组/消息 ID | `ppm install ids` |
-| isalive | isalive | 检测 bot 运行状态 | `ppm install isalive` |
-| calc | calc | 计算器 | `ppm install calc` |
-| encode | encode | 编码/解码 (base64/url/hex) | `ppm install encode` |
-| hitokoto | hitokoto | 随机一言 | `ppm install hitokoto` |
-| qr | qr | 二维码生成 | `ppm install qr` |
-| rev | rev | 文本反转 | `ppm install rev` |
-| sendat | sendat | 定时消息发送 | `ppm install sendat` |
-| gt | gt | 谷歌翻译 | `ppm install gt` |
-| bizhi | bizhi | 随机壁纸 | `ppm install bizhi` |
-| weather | weather | 天气查询 | `ppm install weather` |
-| ping | ping | 网络延迟测试 (TCP/HTTP/ICMP/DC) | `ppm install ping` |
-| leech | leech | 媒体下载 (yt-dlp) | `ppm install leech` |
-| qrcode | qrcode | 二维码生成/解码 (完整版) | `ppm install qrcode` |
-| re | re | 消息复读机 | `ppm install re` |
-| sendlog | sendlog | 日志发送工具 | `ppm install sendlog` |
-| tpm | tpm | 旧版插件管理器 | `ppm install tpm` |
-| bf | bf | 备份工具 | `ppm install bf` |
+| account | username/name/bio/rmpfp | 账号资料管理 | `apt install account` |
+| atadmins | atadmins | 一键艾特全部管理员 | `apt install atadmins` |
+| bizhi | bizhi | 随机壁纸 | `apt install bizhi` |
+| calc | calc | 计算器 | `apt install calc` |
+| duckduckgo | ddg | DuckDuckGo 搜索 | `apt install duckduckgo` |
+| encode | encode | 编码/解码 (base64/url/hex) | `apt install encode` |
+| fun | roll/coin/choose/8ball/fact | 娱乐命令 | `apt install fun` |
+| gt | gt | 谷歌翻译 | `apt install gt` |
+| hitokoto | hitokoto | 随机一言 | `apt install hitokoto` |
+| ids | ids | 显示用户/群组/消息 ID | `apt install ids` |
+| isalive | isalive | 检测 bot 运行状态 | `apt install isalive` |
+| ping | ping | 网络延迟测试 (TCP/HTTP/ICMP/DC) | `apt install ping` |
+| qr | qr | 二维码生成 | `apt install qr` |
+| qrcode | qrcode | 二维码生成/解码 (完整版) | `apt install qrcode` |
+| re | re | 消息复读机 | `apt install re` |
+| rev | rev | 文本反转 | `apt install rev` |
+| save | save | 突破限制保存/转发消息 | `apt install save` |
+| sendat | sendat | 定时消息发送 | `apt install sendat` |
+| speedtest | speedtest | 网络速度测试 | `apt install speedtest` |
+| tpm | tpm | 旧版插件管理器 | `apt install tpm` |
+| weather | weather | 天气查询 | `apt install weather` |
 
 ## 使用方法
 
 ### 安装插件
 ```bash
-ppm install atadmins ids calc
+apt install atadmins ids calc
 ```
 
 ### 加载插件
 ```bash
-ppm load atadmins
+apt load atadmins
 ```
 
 ### 查看已安装
 ```bash
-ppm list
+apt list
 ```
 
 ### 搜索插件
 ```bash
-ppm search 翻译
+apt search 翻译
 ```
 
 ### 卸载插件
 ```bash
-ppm uninstall gt
+apt remove gt
 ```
 
 ## 开发外部插件
