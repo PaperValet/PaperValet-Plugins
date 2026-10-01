@@ -69,11 +69,10 @@ func (p *DuckDuckGoPlugin) DescEN() string      { return Metadata.DescEN }
 func (p *DuckDuckGoPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "duckduckgo",
-		Aliases:     []string{"ddg"},
 		Description: "DuckDuckGo 网页搜索（HTML 版 + Lite 版，Firecrawl 免 Key 回退）",
 		DescEN:      "DuckDuckGo web search (HTML + Lite endpoints, keyless Firecrawl fallback)",
-		Usage:       "ddg <关键词> [-n 条数 1-15] | ddg help",
-		UsageEN:     "ddg <query> [-n count 1-15] | ddg help",
+		Usage:       "duckduckgo <关键词> [-n 条数 1-15] | duckduckgo help",
+		UsageEN:     "duckduckgo <query> [-n count 1-15] | duckduckgo help",
 		Plugin:      p.Name(),
 		Category:    "tools",
 		Handler:     p.handleSearch,
@@ -130,9 +129,9 @@ func (p *DuckDuckGoPlugin) help(ctx *plugin.CommandContext) string {
 	return ctx.Tlocal(
 		"🔍 **DuckDuckGo 搜索**\n\n"+
 			"**用法**\n"+
-			plugin.Code("ddg <关键词>")+"\n"+
 			plugin.Code("duckduckgo <关键词>")+"\n"+
-			plugin.Code("ddg <关键词> -n 5")+" 条数 1–15（默认 8）\n\n"+
+			plugin.Code("duckduckgo <关键词>")+"\n"+
+			plugin.Code("duckduckgo <关键词> -n 5")+" 条数 1–15（默认 8）\n\n"+
 			"**数据源（自动）**\n"+
 			"1\\. DuckDuckGo HTML 版（浏览器请求头）\n"+
 			"2\\. DuckDuckGo Lite 版（HTML 版被拦截时）\n"+
@@ -140,9 +139,9 @@ func (p *DuckDuckGoPlugin) help(ctx *plugin.CommandContext) string {
 			"💡 结果较多时自动分多条消息发送",
 		"🔍 **DuckDuckGo search**\n\n"+
 			"**Usage**\n"+
-			plugin.Code("ddg <query>")+"\n"+
 			plugin.Code("duckduckgo <query>")+"\n"+
-			plugin.Code("ddg <query> -n 5")+" result count 1–15 (default 8)\n\n"+
+			plugin.Code("duckduckgo <query>")+"\n"+
+			plugin.Code("duckduckgo <query> -n 5")+" result count 1–15 (default 8)\n\n"+
 			"**Sources (automatic)**\n"+
 			"1\\. DuckDuckGo HTML (browser-like headers)\n"+
 			"2\\. DuckDuckGo Lite (when HTML is blocked)\n"+
