@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
 
@@ -38,12 +37,12 @@ func (p *SendAtPlugin) Stop(ctx context.Context) error  { return nil }
 
 func (p *SendAtPlugin) handleSendAt(ctx *plugin.CommandContext) error {
 	if len(ctx.Args) < 2 {
-		return ctx.Edit(`⏰ 用法：<code>sendat <时间> <消息></code>
-
-时间格式：
-• <code>+5m</code> — 5 分钟后（s/m/h）
-• <code>18:00</code> — 今天 18:00（已过则为明天）
-• <code>2026-01-01 12:00</code> — 指定日期时间`)
+		return ctx.Edit("⏰ 用法：`sendat <时间> <消息>`\n" +
+			"\n" +
+			"时间格式：\n" +
+			"• `+5m` — 5 分钟后（s/m/h）\n" +
+			"• `18:00` — 今天 18:00（已过则为明天）\n" +
+			"• `2026-01-01 12:00` — 指定日期时间")
 	}
 
 	var when time.Time
@@ -56,13 +55,13 @@ func (p *SendAtPlugin) handleSendAt(ctx *plugin.CommandContext) error {
 	if strings.HasPrefix(arg, "+") {
 		delay, err = time.ParseDuration(strings.TrimPrefix(arg, "+"))
 		if err != nil {
-			return ctx.Edit(fmt.Sprintf("❌ 无法解析时长 %q", arg))
+			return ctx.Edit("❌ 无法解析时长 " + plugin.Code(arg) + "")
 		}
 		when = time.Now().Add(delay)
 	} else if strings.Count(arg, ":") == 1 && !strings.Contains(arg, "-") {
 		t, perr := time.ParseInLocation("15:04", arg, time.Local)
 		if perr != nil {
-			return ctx.Edit(fmt.Sprintf("❌ 无法解析时间 %q", arg))
+			return ctx.Edit("❌ 无法解析时间 " + plugin.Code(arg) + "")
 		}
 		now := time.Now()
 		when = time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, time.Local)
@@ -78,7 +77,7 @@ func (p *SendAtPlugin) handleSendAt(ctx *plugin.CommandContext) error {
 		}
 		t, perr := time.ParseInLocation("2006-01-02 15:04", full, time.Local)
 		if perr != nil {
-			return ctx.Edit(fmt.Sprintf("❌ 无法解析时间 %q", full))
+			return ctx.Edit("❌ 无法解析时间 " + plugin.Code(full) + "")
 		}
 		when = t
 		delay = time.Until(when)
@@ -97,7 +96,7 @@ func (p *SendAtPlugin) handleSendAt(ctx *plugin.CommandContext) error {
 
 	peer, err := ctx.ResolvePeer()
 	if err != nil {
-		return ctx.Edit(fmt.Sprintf("❌ 会话解析失败: %v", err))
+		return ctx.Edit("❌ 会话解析失败: " + plugin.Escape(err.Error()))
 	}
 	api := ctx.API
 
@@ -111,6 +110,5 @@ func (p *SendAtPlugin) handleSendAt(ctx *plugin.CommandContext) error {
 		})
 	})
 
-	return ctx.Edit(fmt.Sprintf("⏰ 已设置定时消息\n\n时间：<code>%s</code>\n内容：<code>%s</code>\n\n注意：进程重启后失效",
-		when.Format("2006-01-02 15:04:05"), msg))
+	return ctx.Edit("⏰ 已设置定时消息\n\n时间：" + plugin.Code(when.Format("2006-01-02 15:04:05")) + "\n内容：" + plugin.Code(msg) + "\n\n注意：进程重启后失效")
 }
