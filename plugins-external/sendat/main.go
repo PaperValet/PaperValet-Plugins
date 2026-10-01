@@ -72,7 +72,6 @@ func (p *SendAtPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	}
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "sendat",
-		Aliases:     []string{"定时", "schedule"},
 		Description: "定时发送消息：间隔 / 每天定时 / 单次，任务持久化，支持列出、暂停、恢复、删除",
 		DescEN:      "Scheduled messages: interval / daily / one-shot, persistent, with list, pause, resume and delete",
 		Usage:       "sendat <时间> | <消息> · sendat list [all] · sendat pause|resume|rm <ID> · sendat tz [时区] · sendat help",
