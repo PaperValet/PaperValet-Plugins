@@ -45,7 +45,6 @@ func (p *HitokotoPlugin) DescEN() string      { return Metadata.DescEN }
 func (p *HitokotoPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "hitokoto",
-		Aliases:     []string{"一言", "yiyan"},
 		Description: "获取随机一言，可按一个或多个类型筛选",
 		DescEN:      "Random Hitokoto quote, optionally filtered by one or more types",
 		Usage:       "hitokoto [类型 a-l …] | hitokoto help",
