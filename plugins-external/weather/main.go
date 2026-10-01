@@ -70,7 +70,7 @@ type wttrResp struct {
 
 func (p *WeatherPlugin) handleWeather(ctx *plugin.CommandContext) error {
 	if len(ctx.Args) == 0 {
-		return ctx.Edit("🌤 用法：<code>weather <城市></code>，例如 <code>weather 北京</code>")
+		return ctx.Edit("🌤 用法：`weather <城市>`，例如 `weather 北京`")
 	}
 	city := strings.Join(ctx.Args, " ")
 
@@ -82,7 +82,7 @@ func (p *WeatherPlugin) handleWeather(ctx *plugin.CommandContext) error {
 	req.Header.Set("User-Agent", "curl/8")
 	resp, err := p.http.Do(req)
 	if err != nil {
-		return ctx.Edit(fmt.Sprintf("❌ 天气查询失败: %v", err))
+		return ctx.Edit("❌ 天气查询失败: " + plugin.Escape(err.Error()))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -110,12 +110,12 @@ func (p *WeatherPlugin) handleWeather(ctx *plugin.CommandContext) error {
 	}
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "🌤 <b>%s</b>\n\n", area)
+	sb.WriteString("🌤 " + plugin.Bold(area) + "\n\n")
 	fmt.Fprintf(&sb, "天气：%s\n气温：%s°C（体感 %s°C）\n湿度：%s%%\n风：%s %s km/h\n",
 		desc, cur.TempC, cur.FeelsLikeC, cur.Humidity, cur.WindDir, cur.WindKmph)
 
 	if len(data.Weather) > 0 {
-		sb.WriteString("\n<b>未来预报</b>\n")
+		sb.WriteString("\n**未来预报**\n")
 		for i, d := range data.Weather {
 			if i >= 3 {
 				break
