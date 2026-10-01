@@ -8,9 +8,9 @@ PaperValet 外部插件仓库 — 所有第三方插件源码统一维护在这�
 |------|------|------|
 | core | ping/restart | 延迟检测、原地重启 |
 | help | help | 帮助系统 |
-| status | status (version) | 版本与运行状态 |
+| status | status | 版本与运行状态 |
 | apt | apt | 插件管理（search/list/install） |
-| info | info (ids) | ID 与跳转链接 |
+| info | info | 用户与聊天信息 |
 | re | re | 复读回复的消息 |
 | alias | alias | 命令别名 |
 | exec | exec | 执行 shell 命令 |
