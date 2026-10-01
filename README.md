@@ -21,16 +21,17 @@ External plugins for [PaperValet](https://github.com/PaperValet/PaperValet) · [
 |---|---|---|---|
 | atadmins | `atadmins` | 一键艾特全部管理员 | Mention every group admin |
 | bizhi | `bizhi` | 随机高清壁纸 | Random wallpaper |
-| duckduckgo | `duckduckgo` · `ddg` | DuckDuckGo 网页搜索 | Web search |
+| duckduckgo | `duckduckgo` | DuckDuckGo 网页搜索 | Web search |
 | gt | `gt` | 谷歌翻译 | Google Translate |
 | hitokoto | `hitokoto` | 随机一言 | Random quote |
 | rev | `rev` | 反转文字，翻转或反色媒体 | Reverse text, flip or invert media |
 | save | `save` | 保存和转发消息，绕过禁止转发 | Save messages, even from no-forward chats |
 | sendat | `sendat` | 定时发送消息，重启不丢 | Scheduled messages that survive restarts |
-| speedtest | `speedtest` · `st` | Ookla 网速测试 | Speedtest by Ookla |
+| speedtest | `speedtest` | Ookla 网速测试 | Speedtest by Ookla |
 | weather | `weather` | 天气查询 | Weather |
 
-每个命令都支持 `help`，比如 `.weather help`。Every command takes `help`, e.g. `.weather help`.
+每个命令都支持 `help`，比如 `.weather help`。插件不带别名，想要短命令用 `.alias`。
+Every command takes `help`, e.g. `.weather help`. Plugins ship no aliases; add your own with `.alias`.
 
 网络延迟测试已经并入内置的 `.ping`。Latency tests moved into the built-in `.ping`.
 
