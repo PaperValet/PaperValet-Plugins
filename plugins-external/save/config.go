@@ -89,7 +89,7 @@ func normalizeTarget(t string) (string, error) {
 	t = strings.TrimSpace(t)
 	low := strings.ToLower(t)
 	switch low {
-	case "", "me", "self", "saved":
+	case "", "me":
 		return "me", nil
 	case "local":
 		return "local", nil
