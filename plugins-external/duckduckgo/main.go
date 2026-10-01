@@ -69,7 +69,7 @@ func (p *DuckDuckGoPlugin) DescEN() string      { return Metadata.DescEN }
 func (p *DuckDuckGoPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "duckduckgo",
-		Aliases:     []string{"ddg", "search", "搜索"},
+		Aliases:     []string{"ddg"},
 		Description: "DuckDuckGo 网页搜索（HTML 版 + Lite 版，Firecrawl 免 Key 回退）",
 		DescEN:      "DuckDuckGo web search (HTML + Lite endpoints, keyless Firecrawl fallback)",
 		Usage:       "ddg <关键词> [-n 条数 1-15] | ddg help",
