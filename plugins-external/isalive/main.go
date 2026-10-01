@@ -40,11 +40,11 @@ func (p *IsAlivePlugin) Start(ctx context.Context) error { return nil }
 func (p *IsAlivePlugin) Stop(ctx context.Context) error  { return nil }
 
 func (p *IsAlivePlugin) handleIsAlive(ctx *plugin.CommandContext) error {
-	return ctx.Edit(`✅ <b>存活检测</b>
-
-状态: <code>在线</code>
-版本: <code>PaperValet 1.0</code>
-运行时: <code>gotd/td</code>
-
-💡 Bot 运行正常`)
+	return ctx.Edit("✅ **存活检测**\n" +
+		"\n" +
+		"状态: `在线`\n" +
+		"版本: `PaperValet 1.0`\n" +
+		"运行时: `gotd/td`\n" +
+		"\n" +
+		"💡 Bot 运行正常")
 }
