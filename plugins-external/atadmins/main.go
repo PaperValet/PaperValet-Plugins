@@ -29,7 +29,7 @@ var Metadata = &plugin.PluginMetadata{
 	Name:        "atadmins",
 	Description: "一键艾特全部管理员",
 	DescEN:      "Mention all group admins at once",
-	Version:     "1.1.0",
+	Version:     "1.0.0",
 	Author:      "PaperValet",
 	MinVersion:  "0.1.0",
 }
