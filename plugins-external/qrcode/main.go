@@ -63,30 +63,30 @@ func (p *QRCodePlugin) handleQRCode(ctx *plugin.CommandContext) error {
 	// Generate QR code
 	code, err := qr.Encode(content, qr.M, qr.Auto)
 	if err != nil {
-		return ctx.Edit(fmt.Sprintf("❌ 生成失败: %v", err))
+		return ctx.Edit("❌ 生成失败: " + plugin.Escape(err.Error()))
 	}
 
 	// Scale to desired size
 	code, err = barcode.Scale(code, size, size)
 	if err != nil {
-		return ctx.Edit(fmt.Sprintf("❌ 缩放失败: %v", err))
+		return ctx.Edit("❌ 缩放失败: " + plugin.Escape(err.Error()))
 	}
 
 	// Save to temp file
 	tmpFile := fmt.Sprintf("/tmp/qrcode_%d.png", time.Now().UnixNano())
 	f, err := os.Create(tmpFile)
 	if err != nil {
-		return ctx.Edit(fmt.Sprintf("❌ 创建文件失败: %v", err))
+		return ctx.Edit("❌ 创建文件失败: " + plugin.Escape(err.Error()))
 	}
 	defer f.Close()
 	defer os.Remove(tmpFile)
 
 	if err := png.Encode(f, code); err != nil {
-		return ctx.Edit(fmt.Sprintf("❌ 编码失败: %v", err))
+		return ctx.Edit("❌ 编码失败: " + plugin.Escape(err.Error()))
 	}
 
 	// Send as file
-	return ctx.Reply(fmt.Sprintf("📱 <b>二维码</b>\n内容: <code>%s</code>\n大小: %dx%d", content, size, size))
+	return ctx.Reply(fmt.Sprintf("📱 **二维码**\n内容: %s\n大小: %dx%d", plugin.Code(content), size, size))
 }
 
 func (p *QRCodePlugin) Start(ctx context.Context) error { return nil }

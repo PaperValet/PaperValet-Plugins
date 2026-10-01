@@ -13,8 +13,8 @@ require (
 	github.com/gotd/neo v0.1.5 // indirect
 	github.com/gotd/td v0.161.0 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
+	github.com/yuin/goldmark v1.8.4 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 )
 
