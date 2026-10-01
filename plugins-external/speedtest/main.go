@@ -58,7 +58,6 @@ func (p *SpeedtestPlugin) DescEN() string      { return "Network speed test (Spe
 func (p *SpeedtestPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "speedtest",
-		Aliases:     []string{"st"},
 		Description: "网络速度测试（Ookla CLI，自动下载）",
 		DescEN:      "Network speed test (Ookla CLI, auto-downloaded)",
 		Usage:       "speedtest [服务器ID|list|best|test <ID>|set <ID>|clear|type <photo|sticker|file|txt>|config|check|diagnose|fix|update|help] [--system|-s]",
@@ -228,9 +227,9 @@ func (p *SpeedtestPlugin) handle(ctx *plugin.CommandContext) error {
 	defer cancel()
 
 	switch cmd {
-	case "help", "h":
+	case "help":
 		return ctx.Edit(helpText(ctx))
-	case "list", "ls":
+	case "list":
 		return p.cmdList(c, ctx)
 	case "set":
 		return p.cmdSet(ctx, arg1)
@@ -239,7 +238,7 @@ func (p *SpeedtestPlugin) handle(ctx *plugin.CommandContext) error {
 			return ctx.Edit("❌ " + plugin.Escape(err.Error()))
 		}
 		return ctx.Edit(header + "✅ " + ctx.Tlocal("默认服务器已清除", "Default server cleared"))
-	case "config", "cfg":
+	case "config":
 		return p.cmdConfig(c, ctx)
 	case "type":
 		return p.cmdType(ctx, arg1)
@@ -256,7 +255,7 @@ func (p *SpeedtestPlugin) handle(ctx *plugin.CommandContext) error {
 		return p.cmdTest(c, ctx, arg1)
 	case "best":
 		return p.cmdBest(c, ctx)
-	case "diagnose", "diag":
+	case "diagnose":
 		return p.cmdDiagnose(c, ctx)
 	case "fix":
 		_ = ctx.Edit(ctx.Tlocal("🔧 正在自动修复 speedtest 安装...", "🔧 Repairing speedtest install..."))
@@ -267,7 +266,7 @@ func (p *SpeedtestPlugin) handle(ctx *plugin.CommandContext) error {
 		return ctx.Edit(header + "✅ " + ctx.Tlocal("自动修复完成", "Repaired") + "\n" +
 			ctx.Tlocal("平台  ", "Platform  ") + plugin.Code(runtime.GOOS+"/"+runtime.GOARCH) + "\n" +
 			ctx.Tlocal("路径  ", "Path  ") + plugin.Code(cliPath()))
-	case "update", "upgrade":
+	case "update":
 		_ = ctx.Edit(ctx.Tlocal("🔄 正在更新 Speedtest CLI...", "🔄 Updating Speedtest CLI..."))
 		removeCLI()
 		if err := downloadCLI(c, true); err != nil {
