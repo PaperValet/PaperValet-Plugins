@@ -17,6 +17,7 @@ func New() *QRPlugin { return &QRPlugin{} }
 
 func (p *QRPlugin) Name() string        { return "qr" }
 func (p *QRPlugin) Description() string { return "二维码生成" }
+func (p *QRPlugin) DescEN() string      { return "QR code generator" }
 
 func (p *QRPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	return mgr.RegisterCommand(&plugin.Command{
