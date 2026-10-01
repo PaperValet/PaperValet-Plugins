@@ -17,6 +17,7 @@ func New() (plugin.Plugin, error) {
 var Metadata = &plugin.PluginMetadata{
 	Name:        "fun",
 	Description: "娱乐命令",
+	DescEN:      "Fun commands",
 	Version:     "1.0.0",
 	Author:      "PaperValet",
 	MinVersion:  "0.1.0",
@@ -24,6 +25,7 @@ var Metadata = &plugin.PluginMetadata{
 
 func (p *FunPlugin) Name() string        { return "fun" }
 func (p *FunPlugin) Description() string { return "娱乐命令" }
+func (p *FunPlugin) DescEN() string      { return "Fun commands" }
 
 func (p *FunPlugin) Init(_ context.Context, mgr plugin.Manager) error {
 	cmds := []*plugin.Command{
