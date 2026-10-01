@@ -2,13 +2,11 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/binary"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -18,435 +16,338 @@ import (
 	"github.com/TiaraBasori/PaperValet/pkg/plugin"
 )
 
-// SavePlugin forwards messages to a configurable target, bypassing
-// forward restrictions via direct API calls.
-type SavePlugin struct {
-	mu     sync.RWMutex
-	dbFile string
-	db     *SaveDB
-}
-
-type SaveDB struct {
-	Users map[string]UserConfig `json:"users"`
-}
-
-type UserConfig struct {
-	Target     string `json:"target"`      // @user, chatID, "me"
-	ShowSource bool   `json:"show_source"` // Whether to append a source link
-}
-
-func New() (plugin.Plugin, error) {
-	return &SavePlugin{
-		dbFile: "data/save_db.json",
-		db:     &SaveDB{Users: make(map[string]UserConfig)},
-	}, nil
-}
+const (
+	configPath   = "data/save/config.json"
+	legacyPath   = "data/save_db.json"
+	tempDirPath  = "data/save/tmp"
+	localRootDir = "save"
+	maxRange     = 500 // messages per range command
+	maxLinks     = 50  // links per command
+	editInterval = 1500 * time.Millisecond
+)
 
 var Metadata = &plugin.PluginMetadata{
 	Name:        "save",
-	Description: "保存消息到本地并发送到指定目标",
-	DescEN:      "Save messages and send them to a target",
-	Version:     "1.0.0",
+	Description: "突破限制保存 / 转发消息",
+	DescEN:      "Save / forward messages, bypassing forward restrictions",
+	Version:     "1.1.0",
 	Author:      "PaperValet",
 	MinVersion:  "0.1.0",
 }
 
+var errStopped = errors.New("plugin is stopping")
+
+// SavePlugin forwards messages to a configurable target and re-uploads
+// content when the source chat restricts forwarding.
+type SavePlugin struct {
+	mu       sync.Mutex
+	db       *SaveDB
+	cfgPath  string
+	legacy   string
+	tmpDir   string
+	localDir string
+
+	jobsMu  sync.Mutex
+	jobs    map[int]context.CancelFunc
+	jobSeq  int
+	stopped bool
+	wg      sync.WaitGroup
+}
+
+func New() *SavePlugin {
+	return &SavePlugin{
+		cfgPath:  configPath,
+		legacy:   legacyPath,
+		tmpDir:   tempDirPath,
+		localDir: localRootDir,
+		db:       &SaveDB{Users: map[string]UserConfig{}},
+		jobs:     map[int]context.CancelFunc{},
+	}
+}
+
 func (p *SavePlugin) Name() string        { return "save" }
-func (p *SavePlugin) Description() string { return "保存消息到本地并发送到指定目标" }
-func (p *SavePlugin) DescEN() string      { return "Save messages and send them to a target" }
+func (p *SavePlugin) Description() string { return Metadata.Description }
+func (p *SavePlugin) DescEN() string      { return Metadata.DescEN }
 
 func (p *SavePlugin) Init(_ context.Context, mgr plugin.Manager) error {
-	p.loadDB()
+	p.mu.Lock()
+	p.db = loadDB(p.cfgPath, p.legacy)
+	p.mu.Unlock()
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "save",
-		Description: "保存消息到本地并发送到指定目标",
-		DescEN:      "Save messages and send them to a target",
-		Usage:       "save（回复）| save <链接…> | save to <目标> | save source on|off",
+		Description: "保存/转发消息：回复、链接、链接范围，受限会话自动下载重传，可保存到本地",
+		DescEN:      "Save/forward messages by reply, links or link ranges; re-uploads from restricted chats; can save locally",
+		Usage:       "save（回复）· save <链接…> [临时目标] · save <链接1>|<链接2> · save to <目标> · save target · save source [on|off] · save help",
+		UsageEN:     "save (reply) · save <links…> [temp target] · save <link1>|<link2> · save to <target> · save target · save source [on|off] · save help",
 		Plugin:      p.Name(),
 		Category:    "tools",
 		OwnerOnly:   true,
-		Handler:     p.handleSave,
+		Handler:     p.handle,
 	})
 }
 
-func (p *SavePlugin) Start(_ context.Context) error { return nil }
-func (p *SavePlugin) Stop(_ context.Context) error  { return nil }
+func (p *SavePlugin) Start(_ context.Context) error {
+	p.jobsMu.Lock()
+	p.stopped = false
+	p.jobsMu.Unlock()
+	p.cleanTemp()
+	return nil
+}
 
-func (p *SavePlugin) loadDB() {
-	data, err := os.ReadFile(p.dbFile)
+// Stop cancels running saves, waits for them and removes temp files.
+func (p *SavePlugin) Stop(ctx context.Context) error {
+	p.jobsMu.Lock()
+	p.stopped = true
+	for _, cancel := range p.jobs {
+		cancel()
+	}
+	p.jobsMu.Unlock()
+	done := make(chan struct{})
+	go func() { p.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	case <-time.After(15 * time.Second):
+	}
+	p.cleanTemp()
+	return nil
+}
+
+func (p *SavePlugin) cleanTemp() {
+	entries, err := os.ReadDir(p.tmpDir)
 	if err != nil {
 		return
 	}
-	var db SaveDB
-	if err := json.Unmarshal(data, &db); err != nil || db.Users == nil {
-		return
-	}
-	p.db = &db
-}
-
-func (p *SavePlugin) saveDB() error {
-	if err := os.MkdirAll(filepath.Dir(p.dbFile), 0o700); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(p.db, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(p.dbFile, data, 0o600)
-}
-
-func (p *SavePlugin) handleSave(ctx *plugin.CommandContext) error {
-	args := ctx.Args
-	if len(args) == 0 {
-		if ctx.Message != nil && ctx.Message.IsReply {
-			return p.saveMessage(ctx, "", ctx.Message.ChatID, []int{ctx.Message.ReplyToID})
-		}
-		return ctx.Edit(p.helpText())
-	}
-
-	sub := args[0]
-	switch sub {
-	case "to", "target":
-		if len(args) < 2 {
-			return p.showTarget(ctx)
-		}
-		return p.setTarget(ctx, args[1])
-	case "source":
-		if len(args) < 2 {
-			return p.showSource(ctx)
-		}
-		return p.setSource(ctx, args[1])
-	case "help", "h":
-		return ctx.Edit(p.helpText())
-	default:
-		if isTmeLink(sub) {
-			return p.handleLinks(ctx, args)
-		}
-		// Reply + custom target override.
-		if ctx.Message != nil && ctx.Message.IsReply {
-			return p.saveMessage(ctx, args[0], ctx.Message.ChatID, []int{ctx.Message.ReplyToID})
-		}
-		return ctx.Edit("未知参数: " + plugin.Code(sub) + "\n\n" + p.helpText())
+	for _, e := range entries {
+		_ = os.RemoveAll(filepath.Join(p.tmpDir, e.Name()))
 	}
 }
 
-func (p *SavePlugin) helpText() string {
-	return "💾 **save — 突破限制保存 / 转发消息**\n" +
-		"\n" +
-		"**命令:**\n" +
-		"• `save` — 回复消息：转发到默认目标\n" +
-		"• `save <@user|chatID>` — 回复消息：临时改目标\n" +
-		"• `save <链接…>` — 批量转发链接\n" +
-		"• `save <链接1> <链接2>` — 转发两链接之间的消息范围（上限100）\n" +
-		"\n" +
-		"**设置:**\n" +
-		"• `save to <@user|chatID|me>` — 默认目标\n" +
-		"• `save target` — 查看默认目标\n" +
-		"• `save source on|off` — 转发后来源链接"
-}
-
-func (p *SavePlugin) getUserConfig(userID string) UserConfig {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if config, ok := p.db.Users[userID]; ok {
-		return config
+func (p *SavePlugin) beginJob(parent context.Context) (context.Context, func(), error) {
+	p.jobsMu.Lock()
+	defer p.jobsMu.Unlock()
+	if p.stopped {
+		return nil, nil, errStopped
 	}
-	return UserConfig{Target: "me", ShowSource: false}
+	c, cancel := context.WithCancel(parent)
+	p.jobSeq++
+	id := p.jobSeq
+	p.jobs[id] = cancel
+	p.wg.Add(1)
+	return c, func() {
+		cancel()
+		p.jobsMu.Lock()
+		delete(p.jobs, id)
+		p.jobsMu.Unlock()
+		p.wg.Done()
+	}, nil
 }
 
-func (p *SavePlugin) setUserConfig(userID string, config UserConfig) error {
+func (p *SavePlugin) userConfig(uid int64) UserConfig {
 	p.mu.Lock()
-	p.db.Users[userID] = config
-	err := p.saveDB()
-	p.mu.Unlock()
-	return err
-}
-
-func (p *SavePlugin) setTarget(ctx *plugin.CommandContext, target string) error {
-	if target != "me" && !strings.HasPrefix(target, "@") {
-		if _, err := strconv.ParseInt(target, 10, 64); err != nil {
-			return ctx.Edit("❌ 目标无效: 支持 @用户名、数字 chatID 或 me")
+	defer p.mu.Unlock()
+	if c, ok := p.db.Users[fmt.Sprint(uid)]; ok {
+		if c.Target == "" {
+			c.Target = "me"
 		}
+		return c
 	}
-	userID := fmt.Sprintf("%d", ctx.Message.UserID)
-	config := p.getUserConfig(userID)
-	config.Target = target
-	if err := p.setUserConfig(userID, config); err != nil {
-		return ctx.Edit("❌ 保存配置失败: " + plugin.Escape(err.Error()))
-	}
-
-	display := target
-	if target == "me" {
-		display = "收藏夹"
-	}
-	return ctx.Edit("✅ 默认保存目标已设为: " + plugin.Code(display))
+	return defaultConfig()
 }
 
-func (p *SavePlugin) showTarget(ctx *plugin.CommandContext) error {
-	userID := fmt.Sprintf("%d", ctx.Message.UserID)
-	config := p.getUserConfig(userID)
-	return ctx.Edit("📍 当前默认目标: " + plugin.Code(config.Target) + "\n\n使用 `save to <目标>` 修改")
-}
-
-func (p *SavePlugin) setSource(ctx *plugin.CommandContext, value string) error {
-	userID := fmt.Sprintf("%d", ctx.Message.UserID)
-	config := p.getUserConfig(userID)
-	switch strings.ToLower(value) {
-	case "on", "true", "1", "yes":
-		config.ShowSource = true
-	case "off", "false", "0", "no":
-		config.ShowSource = false
-	default:
-		return ctx.Edit("用法: save source on|off")
+func (p *SavePlugin) updateConfig(uid int64, f func(*UserConfig)) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	key := fmt.Sprint(uid)
+	c, ok := p.db.Users[key]
+	if !ok {
+		c = defaultConfig()
 	}
-	if err := p.setUserConfig(userID, config); err != nil {
-		return ctx.Edit("❌ 保存配置失败: " + plugin.Escape(err.Error()))
-	}
-	state := "关闭"
-	if config.ShowSource {
-		state = "开启"
-	}
-	return ctx.Edit(fmt.Sprintf("✅ 来源链接显示: %s", state))
-}
-
-func (p *SavePlugin) showSource(ctx *plugin.CommandContext) error {
-	userID := fmt.Sprintf("%d", ctx.Message.UserID)
-	config := p.getUserConfig(userID)
-	state := "关闭"
-	if config.ShowSource {
-		state = "开启"
-	}
-	return ctx.Edit(fmt.Sprintf("🔗 来源链接显示: %s\n\n使用 `save source on|off` 修改", state))
-}
-
-// resolveTarget converts "me" / @username / numeric chatID into an InputPeer.
-func (p *SavePlugin) resolveTarget(ctx *plugin.CommandContext, target string) (tg.InputPeerClass, error) {
-	if target == "" || target == "me" {
-		return ctx.PeerResolver.ResolveFromChatID(ctx.Context(), ctx.Message.UserID)
-	}
-	if strings.HasPrefix(target, "@") && len(target) > 1 {
-		return ctx.PeerResolver.ResolveUsername(ctx.Context(), target[1:])
-	}
-	id, err := strconv.ParseInt(target, 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("无效的目标: %s", target)
-	}
-	return ctx.PeerResolver.ResolveFromChatID(ctx.Context(), id)
-}
-
-// forwardMessage saves message IDs from sourceChat and sends them to the target.
-func (p *SavePlugin) forwardMessage(ctx *plugin.CommandContext, targetOverride string, sourceChatID int64, ids []int) error {
-	return p.saveMessage(ctx, targetOverride, sourceChatID, ids)
-}
-func (p *SavePlugin) saveMessage(ctx *plugin.CommandContext, targetOverride string, sourceChatID int64, ids []int) error {
-	userID := fmt.Sprintf("%d", ctx.Message.UserID)
-	config := p.getUserConfig(userID)
-	target := config.Target
-	if targetOverride != "" {
-		target = targetOverride
-	}
-
-	// Save the current replied message locally when it has downloadable media.
-	if len(ids) == 1 && ctx.Message != nil && ctx.Message.IsReply && ctx.Message.Media != nil && ctx.Downloader != nil && ctx.Media != nil {
-		if path, err := ctx.Downloader.DownloadMedia(ctx.Context(), ctx.Message); err == nil {
-			defer os.Remove(path)
-			destID := ctx.Message.UserID
-			if target != "" && target != "me" {
-				if strings.HasPrefix(target, "@") || func() bool { _, err := strconv.ParseInt(target, 10, 64); return err != nil }() {
-					return ctx.Edit("❌ 本地媒体目标仅支持数字 chatID 或 me")
-				}
-				id, _ := strconv.ParseInt(target, 10, 64)
-				destID = id
-			}
-			if err := ctx.Media.SendFile(ctx.Context(), destID, path, sourceLink(sourceChatID, ids[0]), 0); err != nil {
-				return ctx.Edit("❌ 上传失败: " + plugin.Escape(err.Error()))
-			}
-			return ctx.Edit("✅ 已保存媒体并发送 1 条消息")
+	old, had := p.db.Users[key]
+	f(&c)
+	p.db.Users[key] = c
+	if err := writeDB(p.cfgPath, p.db); err != nil {
+		if had {
+			p.db.Users[key] = old
+		} else {
+			delete(p.db.Users, key)
 		}
-	}
-	return p.forwardMessageRaw(ctx, target, sourceChatID, ids, config.ShowSource)
-}
-
-func (p *SavePlugin) forwardMessageRaw(ctx *plugin.CommandContext, target string, sourceChatID int64, ids []int, showSource bool) error {
-	destPeer, err := p.resolveTarget(ctx, target)
-	if err != nil {
-		return ctx.Edit("❌ 解析目标失败: " + plugin.Escape(err.Error()))
-	}
-	fromPeer, err := ctx.PeerResolver.ResolveFromChatID(ctx.Context(), sourceChatID)
-	if err != nil {
-		return ctx.Edit("❌ 解析来源失败: " + plugin.Escape(err.Error()))
-	}
-	_, err = ctx.API.MessagesForwardMessages(ctx.Context(), &tg.MessagesForwardMessagesRequest{
-		FromPeer: fromPeer, ID: ids, RandomID: randomIDs(len(ids)), ToPeer: destPeer, DropAuthor: true,
-	})
-	if err != nil {
-		return ctx.Edit("❌ 转发失败: " + plugin.Escape(err.Error()))
-	}
-	if showSource && len(ids) > 0 {
-		_, _ = ctx.API.MessagesSendMessage(ctx.Context(), &tg.MessagesSendMessageRequest{
-			Peer: destPeer, Message: sourceLink(sourceChatID, ids[0]), RandomID: randomID(),
-		})
-	}
-	display := target
-	if target == "me" || target == "" {
-		display = "收藏夹"
-	}
-	return ctx.Edit(fmt.Sprintf("✅ 已转发 %d 条消息到 %s", len(ids), plugin.Code(display)))
-}
-
-// sourceLink builds a t.me/c/ link for channel/supergroup sources.
-func sourceLink(chatID int64, msgID int) string {
-	if chatID <= -1000000000000 {
-		return fmt.Sprintf("📎 来源: https://t.me/c/%d/%d", -1000000000000-chatID, msgID)
-	}
-	return fmt.Sprintf("📎 来源: chat %d, msg %d", chatID, msgID)
-}
-
-// msgLink is one parsed t.me message link.
-type msgLink struct {
-	username string // public chat username, if any
-	chatID   int64  // private channel ID (raw, without -100 prefix)
-	msgID    int
-}
-
-func isTmeLink(s string) bool {
-	return strings.HasPrefix(s, "https://t.me/") || strings.HasPrefix(s, "t.me/")
-}
-
-func parseTmeLink(s string) (*msgLink, error) {
-	s = strings.TrimPrefix(s, "https://t.me/")
-	s = strings.TrimPrefix(s, "t.me/")
-	parts := strings.Split(strings.Trim(s, "/"), "/")
-	if len(parts) < 2 {
-		return nil, fmt.Errorf("无法解析链接")
-	}
-	msgID, err := strconv.Atoi(parts[len(parts)-1])
-	if err != nil || msgID <= 0 {
-		return nil, fmt.Errorf("链接中缺少有效的消息 ID")
-	}
-	if parts[0] == "c" && len(parts) >= 3 {
-		chatID, err := strconv.ParseInt(parts[1], 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("无效的频道 ID")
-		}
-		return &msgLink{chatID: chatID, msgID: msgID}, nil
-	}
-	return &msgLink{username: parts[0], msgID: msgID}, nil
-}
-
-// resolveLinkPeer resolves the chat a link points to.
-func (p *SavePlugin) resolveLinkPeer(ctx *plugin.CommandContext, l *msgLink) (tg.InputPeerClass, error) {
-	if l.username != "" {
-		return ctx.PeerResolver.ResolveUsername(ctx.Context(), l.username)
-	}
-	return ctx.PeerResolver.ResolveFromChatID(ctx.Context(), -1000000000000-l.chatID)
-}
-
-func (p *SavePlugin) handleLinks(ctx *plugin.CommandContext, args []string) error {
-	var links []*msgLink
-	for _, arg := range args {
-		if !isTmeLink(arg) {
-			continue
-		}
-		l, err := parseTmeLink(arg)
-		if err != nil {
-			return ctx.Edit(plugin.Escape(fmt.Sprintf("❌ %s: %v", arg, err)))
-		}
-		links = append(links, l)
-	}
-	if len(links) == 0 {
-		return ctx.Edit("❌ 未识别到有效的 t.me 链接")
-	}
-
-	// Range mode: two links in the same chat.
-	if len(links) == 2 && links[0].username == links[1].username && links[0].chatID == links[1].chatID && links[0].msgID != links[1].msgID {
-		lo, hi := links[0].msgID, links[1].msgID
-		if lo > hi {
-			lo, hi = hi, lo
-		}
-		if hi-lo >= 100 {
-			return ctx.Edit("❌ 范围过大，最多 100 条")
-		}
-		peer, err := p.resolveLinkPeer(ctx, links[0])
-		if err != nil {
-			return ctx.Edit("❌ 解析来源失败: " + plugin.Escape(err.Error()))
-		}
-		var ids []int
-		for id := lo; id <= hi; id++ {
-			ids = append(ids, id)
-		}
-		return p.forwardFromPeer(ctx, "", peer, ids)
-	}
-
-	// Single / batch mode.
-	sent := 0
-	var failures []string
-	for _, l := range links {
-		peer, err := p.resolveLinkPeer(ctx, l)
-		if err != nil {
-			failures = append(failures, fmt.Sprintf("%s: %v", argLabel(l), err))
-			continue
-		}
-		if err := p.forwardFromPeer(ctx, "", peer, []int{l.msgID}); err != nil {
-			failures = append(failures, fmt.Sprintf("%s: %v", argLabel(l), err))
-			continue
-		}
-		sent++
-	}
-	if len(failures) > 0 {
-		return ctx.Edit(fmt.Sprintf("⚠️ 已转发 %d 条，失败 %d 条\n%s", sent, len(failures), plugin.Escape(strings.Join(failures, "\n"))))
-	}
-	if sent == 0 {
-		return ctx.Edit("❌ 没有链接转发成功")
+		return err
 	}
 	return nil
 }
 
-// forwardFromPeer forwards by resolved peer (used by link mode).
-func (p *SavePlugin) forwardFromPeer(ctx *plugin.CommandContext, targetOverride string, fromPeer tg.InputPeerClass, ids []int) error {
-	userID := fmt.Sprintf("%d", ctx.Message.UserID)
-	config := p.getUserConfig(userID)
-	target := config.Target
-	if targetOverride != "" {
-		target = targetOverride
-	}
+// ---------------------------------------------------------------- commands
 
-	destPeer, err := p.resolveTarget(ctx, target)
-	if err != nil {
-		return ctx.Edit("❌ 解析目标失败: " + plugin.Escape(err.Error()))
-	}
-	_, err = ctx.API.MessagesForwardMessages(ctx.Context(), &tg.MessagesForwardMessagesRequest{
-		FromPeer: fromPeer, ID: ids, RandomID: randomIDs(len(ids)), ToPeer: destPeer, DropAuthor: true,
-	})
-	if err != nil {
-		return ctx.Edit("❌ 转发失败: " + plugin.Escape(err.Error()))
-	}
-	display := target
-	if target == "me" || target == "" {
-		display = "收藏夹"
-	}
-	return ctx.Edit(fmt.Sprintf("✅ 已转发 %d 条消息到 %s", len(ids), plugin.Code(display)))
+func helpText(ctx *plugin.CommandContext) string {
+	tl := ctx.Tlocal
+	line := func(cmd, zh, en string) string { return plugin.Code(cmd) + "  " + tl(zh, en) + "\n" }
+	var b strings.Builder
+	b.WriteString("💾 **" + tl("save — 突破限制保存 / 转发消息", "save — save / forward messages past restrictions") + "**\n\n")
+	b.WriteString("**" + tl("命令", "Commands") + "**\n")
+	b.WriteString(line("save", "回复消息：保存到默认目标（相册整组保存）", "reply to a message: save to the default target (whole album)"))
+	b.WriteString(line(tl("save <目标>", "save <target>"), "回复消息：临时改目标", "reply: use a temporary target"))
+	b.WriteString(line(tl("save <链接…>", "save <links…>"), "批量保存链接", "save several links"))
+	b.WriteString(line(tl("save <链接1>|<链接2>", "save <link1>|<link2>"), fmt.Sprintf("保存两链接之间的消息范围（最多 %d 条）", maxRange), fmt.Sprintf("save the range between two links (max %d)", maxRange)))
+	b.WriteString(line(tl("save <链接> <临时目标>", "save <link> <temp target>"), "临时改目标（可用 local）", "temporary target (local works too)"))
+	b.WriteString("\n**" + tl("设置", "Settings") + "**\n")
+	b.WriteString(line(tl("save to <目标>", "save to <target>"), "默认目标：@user / chatid / me / local", "default target: @user / chat id / me / local"))
+	b.WriteString(line("save target", "查看默认目标", "show the default target"))
+	b.WriteString(line("save source on|off", "保存后回复来源信息", "reply source info after saving"))
+	b.WriteString(line("save source", "查看来源开关", "show the source switch"))
+	b.WriteString("\n**local**\n")
+	b.WriteString(tl("媒体保存到 ", "Media is saved to ") + plugin.Code("save/<chatId>/") + tl("，旁路 .json 元数据并生成索引；纯文本跳过", " with a .json sidecar and an index file; text-only messages are skipped") + "\n\n")
+	b.WriteString("💡 " + tl("会话禁止转发时会自动下载后重新发送", "When a chat forbids forwarding, content is downloaded and re-sent"))
+	return b.String()
 }
 
-func randomID() int64 {
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err == nil {
-		return int64(binary.LittleEndian.Uint64(b[:]))
+func (p *SavePlugin) handle(ctx *plugin.CommandContext) error {
+	if ctx.Message == nil || ctx.Message.Message == nil || ctx.API == nil {
+		return plugin.ErrNoMessage
 	}
-	return time.Now().UnixNano()
+	tl := ctx.Tlocal
+	args := ctx.Args
+	sub := ""
+	if len(args) > 0 {
+		sub = strings.ToLower(args[0])
+	}
+	switch sub {
+	case "help", "h":
+		if len(args) == 1 {
+			return ctx.Edit(helpText(ctx))
+		}
+	case "source":
+		return p.cmdSource(ctx, args[1:])
+	case "to":
+		if len(args) < 2 {
+			return ctx.Edit("❌ " + tl("请指定保存目标", "Please give a target") + "\n\n💡 " +
+				plugin.Code("save to @username") + " " + plugin.Code("save to -1001234567890") + " " +
+				plugin.Code("save to me") + " " + plugin.Code("save to local"))
+		}
+		return p.cmdSetTarget(ctx, strings.Join(args[1:], " "))
+	case "target":
+		if len(args) >= 2 {
+			return p.cmdSetTarget(ctx, strings.Join(args[1:], " "))
+		}
+		cfg := p.userConfig(ctx.Message.UserID)
+		return ctx.Edit("📌 " + tl("当前默认目标  ", "Default target  ") + plugin.Code(targetLabel(cfg.Target, tl)) +
+			"\n\n💡 " + plugin.Code(tl("save to <目标>", "save to <target>")))
+	}
+	return p.cmdSave(ctx)
 }
 
-func randomIDs(n int) []int64 {
-	ids := make([]int64, n)
-	for i := range ids {
-		ids[i] = randomID()
+func targetLabel(t string, tl func(string, string) string) string {
+	switch t {
+	case "", "me":
+		return tl("收藏夹 (me)", "Saved Messages (me)")
+	case "local":
+		return tl("本地 (local)", "local disk (local)")
 	}
+	return t
+}
+
+func (p *SavePlugin) cmdSetTarget(ctx *plugin.CommandContext, raw string) error {
+	tl := ctx.Tlocal
+	t, err := normalizeTarget(raw)
+	if err != nil {
+		return ctx.Edit("❌ " + tl("目标无效：支持 @用户名、数字 chatID、me 或 local", "Invalid target: use @username, numeric chat id, me or local"))
+	}
+	if t != "me" && t != "local" {
+		if _, _, err := resolveTarget(ctx, t); err != nil {
+			return ctx.Edit("❌ " + tl("无法访问目标对话 ", "Cannot access target chat ") + plugin.Code(t) + "\n" + plugin.Escape(err.Error()))
+		}
+	}
+	if err := p.updateConfig(ctx.Message.UserID, func(c *UserConfig) { c.Target = t }); err != nil {
+		return ctx.Edit("❌ " + tl("保存配置失败: ", "Failed to save config: ") + plugin.Escape(err.Error()))
+	}
+	return ctx.Edit("✅ " + tl("已设置默认保存目标为 ", "Default target set to ") + plugin.Code(targetLabel(t, tl)))
+}
+
+func (p *SavePlugin) cmdSource(ctx *plugin.CommandContext, args []string) error {
+	tl := ctx.Tlocal
+	if len(args) == 0 {
+		cfg := p.userConfig(ctx.Message.UserID)
+		state := tl("关闭 ❌", "off ❌")
+		if cfg.ShowSource {
+			state = tl("开启 ✅", "on ✅")
+		}
+		return ctx.Edit("📊 " + tl("来源显示  ", "Source info  ") + "**" + state + "**\n\n💡 " + plugin.Code("save source on|off"))
+	}
+	var on bool
+	switch strings.ToLower(args[0]) {
+	case "on", "true", "1", "yes", "开":
+		on = true
+	case "off", "false", "0", "no", "关":
+		on = false
+	default:
+		return ctx.Edit("❌ " + tl("无效的参数，使用 ", "Invalid argument, use ") + plugin.Code("save source on|off"))
+	}
+	if err := p.updateConfig(ctx.Message.UserID, func(c *UserConfig) { c.ShowSource = on }); err != nil {
+		return ctx.Edit("❌ " + tl("保存配置失败: ", "Failed to save config: ") + plugin.Escape(err.Error()))
+	}
+	if on {
+		return ctx.Edit("✅ " + tl("已开启来源显示：保存后会回复一条包含原消息链接的来源消息", "Source info on: a source message with the original link is replied after saving"))
+	}
+	return ctx.Edit("✅ " + tl("已关闭来源显示", "Source info off"))
+}
+
+// resolveTarget turns a normalized target into an InputPeer and label.
+func resolveTarget(ctx *plugin.CommandContext, t string) (tg.InputPeerClass, string, error) {
+	tl := ctx.Tlocal
+	switch {
+	case t == "" || t == "me":
+		return &tg.InputPeerSelf{}, tl("收藏夹", "Saved Messages"), nil
+	case ctx.PeerResolver == nil:
+		return nil, "", errors.New("no peer resolver")
+	case strings.HasPrefix(t, "@"):
+		peer, err := ctx.PeerResolver.ResolveUsername(ctx.Context(), t[1:])
+		return peer, t, err
+	}
+	var id int64
+	if _, err := fmt.Sscan(t, &id); err != nil {
+		return nil, "", fmt.Errorf("invalid target %s", t)
+	}
+	if id == ctx.SelfID && id != 0 {
+		return &tg.InputPeerSelf{}, tl("收藏夹", "Saved Messages"), nil
+	}
+	peer, err := ctx.PeerResolver.ResolveFromChatID(ctx.Context(), id)
+	return peer, t, err
+}
+
+// replyTarget returns the replied message id and its chat, or ok=false.
+// A plain message inside a forum topic carries a reply header pointing at
+// the topic root; that is not a reply.
+func replyTarget(ev *plugin.MessageEvent) (chatID int64, msgID int, ok bool) {
+	if ev == nil || ev.Message == nil {
+		return 0, 0, false
+	}
+	hdr, isHdr := ev.Message.ReplyTo.(*tg.MessageReplyHeader)
+	if !isHdr {
+		return 0, 0, false
+	}
+	id, has := hdr.GetReplyToMsgID()
+	if !has || id <= 0 {
+		return 0, 0, false
+	}
+	if hdr.ForumTopic {
+		if _, hasTop := hdr.GetReplyToTopID(); !hasTop {
+			return 0, 0, false
+		}
+	}
+	chatID = ev.ChatID
+	if pid, ok := hdr.GetReplyToPeerID(); ok && pid != nil {
+		if c := chatIDOfPeer(pid); c != 0 {
+			chatID = c
+		}
+	}
+	return chatID, id, true
+}
+
+func sortedKeys(m map[int]*tg.Message) []int {
+	ids := make([]int, 0, len(m))
+	for id := range m {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
 	return ids
-}
-
-func argLabel(l *msgLink) string {
-	if l.username != "" {
-		return fmt.Sprintf("t.me/%s/%d", l.username, l.msgID)
-	}
-	return fmt.Sprintf("t.me/c/%d/%d", l.chatID, l.msgID)
 }
