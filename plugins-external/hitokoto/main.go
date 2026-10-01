@@ -21,7 +21,8 @@ func New() *HitokotoPlugin {
 }
 
 func (p *HitokotoPlugin) Name() string        { return "hitokoto" }
-func (p *HitokotoPlugin) Description() string { return "获取随机一言" }
+func (p *HitokotoPlugin) Description() string { return "随机一言" }
+func (p *HitokotoPlugin) DescEN() string      { return "Random quote (Hitokoto)" }
 
 func (p *HitokotoPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	return mgr.RegisterCommand(&plugin.Command{
