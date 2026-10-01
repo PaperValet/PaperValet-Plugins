@@ -49,7 +49,6 @@ func (p *WeatherPlugin) DescEN() string      { return Metadata.DescEN }
 func (p *WeatherPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "weather",
-		Aliases:     []string{"天气", "wt"},
 		Description: "查询全球城市实时天气（Open-Meteo，中文城市名自动识别）",
 		DescEN:      "Real-time weather for any city (Open-Meteo, Chinese names supported)",
 		Usage:       "weather <城市名> | weather help",
