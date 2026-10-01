@@ -14,13 +14,15 @@ func New() *SpeedtestPlugin { return &SpeedtestPlugin{} }
 
 func (p *SpeedtestPlugin) Name() string        { return "speedtest" }
 func (p *SpeedtestPlugin) Description() string { return "网络速度测试" }
+func (p *SpeedtestPlugin) DescEN() string      { return "Network speed test" }
 
 func (p *SpeedtestPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	cmds := []*plugin.Command{
 		{
 			Name:        "speedtest",
 			Aliases:     []string{"st", "网速", "speed"},
-			Description: "测试网络速度 (需要 speedtest-cli 或 iperf3)",
+			Description: "网络速度测试",
+			DescEN:      "Network speed test",
 			Usage:       "speedtest [simple|full]",
 			Plugin:      p.Name(),
 			Category:    "tools",
