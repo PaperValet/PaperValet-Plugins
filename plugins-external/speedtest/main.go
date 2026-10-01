@@ -34,7 +34,7 @@ var Metadata = &plugin.PluginMetadata{
 	Name:        "speedtest",
 	Description: "网络速度测试（Speedtest by Ookla）",
 	DescEN:      "Network speed test (Speedtest by Ookla)",
-	Version:     "1.1.1",
+	Version:     "1.0.0",
 	Author:      "PaperValet",
 	MinVersion:  "0.1.0",
 }
