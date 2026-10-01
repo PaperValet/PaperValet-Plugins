@@ -27,35 +27,23 @@ PaperValet 外部插件仓库 — 所有第三方插件源码统一维护在这�
 
 | 插件 | 命令 | 说明 | 安装 |
 |------|------|------|----------|
-| account | username/name/bio/rmpfp | 账号资料管理 | `apt install account` |
 | atadmins | atadmins | 一键艾特全部管理员 | `apt install atadmins` |
 | bizhi | bizhi | 随机壁纸 | `apt install bizhi` |
-| calc | calc | 计算器 | `apt install calc` |
-| duckduckgo | ddg | DuckDuckGo 搜索 | `apt install duckduckgo` |
-| encode | encode | 编码/解码 (base64/url/hex) | `apt install encode` |
-| fun | roll/coin/choose/8ball/fact | 娱乐命令 | `apt install fun` |
+| duckduckgo | ddg | DuckDuckGo 网页搜索 | `apt install duckduckgo` |
 | gt | gt | 谷歌翻译 | `apt install gt` |
 | hitokoto | hitokoto | 随机一言 | `apt install hitokoto` |
-| isalive | isalive | 检测 bot 运行状态 | `apt install isalive` |
-| ping | ping | 网络延迟测试 (TCP/HTTP/ICMP/DC) | `apt install ping` |
-| qr | qr | 二维码生成 | `apt install qr` |
-| qrcode | qrcode | 二维码生成/解码 (完整版) | `apt install qrcode` |
-| rev | rev | 文本反转 | `apt install rev` |
+| ping | ping | 网络延迟测试 (API/DC/TCP/HTTP/ICMP，支持代理) | `apt install ping` |
+| rev | rev | 文本/图片/GIF/贴纸反转 | `apt install rev` |
 | save | save | 突破限制保存/转发消息 | `apt install save` |
-| sendat | sendat | 定时消息发送 | `apt install sendat` |
-| speedtest | speedtest | 网络速度测试 | `apt install speedtest` |
-| weather | weather | 天气查询 | `apt install weather` |
+| sendat | sendat | 定时/循环消息任务 | `apt install sendat` |
+| speedtest | speedtest | Ookla 网络测速 | `apt install speedtest` |
+| weather | weather | 天气查询 (Open-Meteo) | `apt install weather` |
 
 ## 使用方法
 
 ### 安装插件
 ```bash
-apt install atadmins calc
-```
-
-### 加载插件
-```bash
-apt load atadmins
+apt install atadmins gt
 ```
 
 ### 查看已安装
@@ -124,7 +112,7 @@ PaperValet-Plugins/
 │   ├── atadmins/
 │   │   ├── main.go
 │   │   └── go.mod
-│   ├── calc/
+│   ├── gt/
 │   │   ├── main.go
 │   │   └── go.mod
 │   └── ...
