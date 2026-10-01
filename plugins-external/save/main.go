@@ -30,7 +30,7 @@ var Metadata = &plugin.PluginMetadata{
 	Name:        "save",
 	Description: "突破限制保存 / 转发消息",
 	DescEN:      "Save / forward messages, bypassing forward restrictions",
-	Version:     "1.1.0",
+	Version:     "1.0.0",
 	Author:      "PaperValet",
 	MinVersion:  "0.1.0",
 }
