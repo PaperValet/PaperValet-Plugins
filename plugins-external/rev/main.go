@@ -30,7 +30,7 @@ var Metadata = &plugin.PluginMetadata{
 	Name:        "rev",
 	Description: "反转文字（保留格式）或翻转/反色媒体",
 	DescEN:      "Reverse text (keeps formatting) or flip/invert media",
-	Version:     "1.1.0",
+	Version:     "1.0.0",
 	Author:      "PaperValet",
 	MinVersion:  "0.1.0",
 }
