@@ -45,6 +45,28 @@ func cliPath() string {
 	return p
 }
 
+// cliCommand builds an exec.Cmd for a speedtest binary. The Ookla CLI
+// aborts (std::logic_error) when $HOME is unset, which is the default
+// under systemd, so HOME falls back to the plugin data directory.
+func cliCommand(ctx context.Context, bin string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Env = cliEnv(os.Environ())
+	return cmd
+}
+
+func cliEnv(env []string) []string {
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "HOME="); ok && v != "" {
+			return env
+		}
+	}
+	home, err := filepath.Abs(dataDir)
+	if err != nil {
+		home = dataDir
+	}
+	return append(env, "HOME="+home)
+}
+
 // archiveName picks the Ookla package for the running OS/arch.
 func archiveName(goos, goarch, goarm string) (string, error) {
 	switch goos {
@@ -205,7 +227,7 @@ func diagnose(ctx context.Context) diagnosis {
 	}
 	for _, arg := range []string{"--version", "--help"} {
 		c, cancel := context.WithTimeout(ctx, 10*time.Second)
-		out, _ := exec.CommandContext(c, path, arg).CombinedOutput()
+		out, _ := cliCommand(c, path, arg).CombinedOutput()
 		cancel()
 		s := string(out)
 		if strings.Contains(s, "Speedtest") || strings.Contains(strings.ToLower(s), "usage") {
@@ -459,7 +481,7 @@ func runCLI(ctx context.Context, bin string, fl flavour, serverID int) (*Result,
 	}
 	c, cancel := context.WithTimeout(ctx, runTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(c, bin, args...)
+	cmd := cliCommand(c, bin, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
@@ -501,7 +523,7 @@ func findSystemCLI(ctx context.Context) (string, flavour, error) {
 			continue
 		}
 		c, cancel := context.WithTimeout(ctx, 10*time.Second)
-		out, _ := exec.CommandContext(c, p, "--version").CombinedOutput()
+		out, _ := cliCommand(c, p, "--version").CombinedOutput()
 		cancel()
 		if strings.Contains(string(out), "Ookla") {
 			return p, flavourOokla, nil
@@ -583,7 +605,7 @@ func listServers(ctx context.Context) ([]Server, error) {
 	}
 	c, cancel := context.WithTimeout(ctx, listTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(c, cliPath(), "--accept-license", "--accept-gdpr", "-f", "json", "-L")
+	cmd := cliCommand(c, cliPath(), "--accept-license", "--accept-gdpr", "-f", "json", "-L")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
