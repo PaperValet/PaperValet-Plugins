@@ -18,12 +18,14 @@ func New() *AtAdminsPlugin { return &AtAdminsPlugin{} }
 
 func (p *AtAdminsPlugin) Name() string        { return "atadmins" }
 func (p *AtAdminsPlugin) Description() string { return "一键艾特全部管理员" }
+func (p *AtAdminsPlugin) DescEN() string      { return "Mention all group admins at once" }
 
 func (p *AtAdminsPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "atadmins",
 		Aliases:     []string{"calladmins", "管理员"},
-		Description: "艾特群组所有管理员",
+		Description: "一键艾特全部管理员",
+		DescEN:      "Mention all group admins at once",
 		Usage:       "atadmins [消息内容]",
 		Plugin:      p.Name(),
 		Category:    "group",
