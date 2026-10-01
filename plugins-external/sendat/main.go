@@ -17,12 +17,14 @@ func New() *SendAtPlugin { return &SendAtPlugin{} }
 
 func (p *SendAtPlugin) Name() string        { return "sendat" }
 func (p *SendAtPlugin) Description() string { return "定时发送消息" }
+func (p *SendAtPlugin) DescEN() string      { return "Send messages on a schedule" }
 
 func (p *SendAtPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "sendat",
 		Aliases:     []string{"定时", "schedule"},
-		Description: "在指定时间发送消息（进程重启后失效）",
+		Description: "定时发送消息",
+		DescEN:      "Send messages on a schedule",
 		Usage:       "sendat <+5m|18:00|2006-01-02 15:04> <消息>",
 		Plugin:      p.Name(),
 		Category:    "tools",
