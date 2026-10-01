@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
-	"fmt"
 	"net/url"
 	"strings"
 
@@ -36,12 +35,12 @@ func (p *EncodePlugin) Stop(ctx context.Context) error  { return nil }
 
 func (p *EncodePlugin) handleEncode(ctx *plugin.CommandContext) error {
 	if len(ctx.Args) < 3 {
-		return ctx.Edit(`🔐 <b>编码/解码工具</b>
-
-用法: <code>encode <类型> <encode|decode> <内容></code>
-
-类型: base64 / url / hex
-示例: <code>encode base64 encode Hello</code>`)
+		return ctx.Edit("🔐 **编码/解码工具**\n" +
+			"\n" +
+			"用法: `encode <类型> <encode|decode> <内容>`\n" +
+			"\n" +
+			"类型: base64 / url / hex\n" +
+			"示例: `encode base64 encode Hello`")
 	}
 
 	typ := strings.ToLower(ctx.Args[0])
@@ -83,13 +82,12 @@ func (p *EncodePlugin) handleEncode(ctx *plugin.CommandContext) error {
 		return ctx.Edit("❌ 未知类型，支持 base64 / url / hex")
 	}
 	if err != nil {
-		return ctx.Edit(fmt.Sprintf("❌ 解码失败: %v", err))
+		return ctx.Edit("❌ 解码失败: " + plugin.Escape(err.Error()))
 	}
 
 	op := "编码"
 	if decode {
 		op = "解码"
 	}
-	return ctx.Edit(fmt.Sprintf("🔐 <b>%s %s</b>\n\n输入: <code>%s</code>\n输出: <code>%s</code>",
-		typ, op, input, out))
+	return ctx.Edit("🔐 " + plugin.Bold(typ+" "+op) + "\n\n输入: " + plugin.Code(input) + "\n输出: " + plugin.Code(out))
 }
