@@ -22,7 +22,8 @@ func New() *BizhiPlugin {
 }
 
 func (p *BizhiPlugin) Name() string        { return "bizhi" }
-func (p *BizhiPlugin) Description() string { return "发送随机壁纸" }
+func (p *BizhiPlugin) Description() string { return "随机壁纸" }
+func (p *BizhiPlugin) DescEN() string      { return "Random wallpaper" }
 
 func (p *BizhiPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	return mgr.RegisterCommand(&plugin.Command{
