@@ -29,7 +29,7 @@ var Metadata = &plugin.PluginMetadata{
 	Name:        "weather",
 	Description: "天气查询（Open-Meteo，wttr.in 备用）",
 	DescEN:      "Weather lookup (Open-Meteo, wttr.in fallback)",
-	Version:     "1.1.0",
+	Version:     "1.0.0",
 	Author:      "PaperValet",
 	MinVersion:  "0.1.0",
 }
