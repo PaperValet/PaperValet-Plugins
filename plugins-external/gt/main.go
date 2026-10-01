@@ -45,7 +45,7 @@ var langCodeRe = regexp.MustCompile(`^[a-z]{2,3}(-[a-zA-Z]{2,4})?$`)
 
 func (p *GtPlugin) handleTranslate(ctx *plugin.CommandContext) error {
 	if len(ctx.Args) == 0 {
-		return ctx.Edit("🌐 用法：<code>gt [目标语言] <文本></code>\n示例：<code>gt en 你好</code>、<code>gt hello world</code>")
+		return ctx.Edit("🌐 用法：`gt [目标语言] <文本>`\n示例：`gt en 你好`、`gt hello world`")
 	}
 
 	args := ctx.Args
@@ -79,7 +79,7 @@ func (p *GtPlugin) handleTranslate(ctx *plugin.CommandContext) error {
 	req.Header.Set("User-Agent", "Mozilla/5.0")
 	resp, err := p.http.Do(req)
 	if err != nil {
-		return ctx.Edit(fmt.Sprintf("❌ 翻译请求失败: %v", err))
+		return ctx.Edit("❌ 翻译请求失败: " + plugin.Escape(err.Error()))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -112,7 +112,7 @@ func (p *GtPlugin) handleTranslate(ctx *plugin.CommandContext) error {
 		detected, _ = raw[2].(string)
 	}
 
-	return ctx.Edit(fmt.Sprintf("🌐 <b>翻译</b>（%s → %s）\n\n%s", detected, target, translated))
+	return ctx.Edit(fmt.Sprintf("🌐 **翻译**（%s → %s）\n\n%s", plugin.Escape(detected), plugin.Escape(target), plugin.Escape(translated)))
 }
 
 func containsCJK(s string) bool {
