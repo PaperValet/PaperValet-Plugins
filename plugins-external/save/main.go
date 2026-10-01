@@ -45,6 +45,7 @@ func New() (plugin.Plugin, error) {
 var Metadata = &plugin.PluginMetadata{
 	Name:        "save",
 	Description: "保存消息到本地并发送到指定目标",
+	DescEN:      "Save messages and send them to a target",
 	Version:     "1.0.0",
 	Author:      "PaperValet",
 	MinVersion:  "0.1.0",
@@ -52,12 +53,14 @@ var Metadata = &plugin.PluginMetadata{
 
 func (p *SavePlugin) Name() string        { return "save" }
 func (p *SavePlugin) Description() string { return "保存消息到本地并发送到指定目标" }
+func (p *SavePlugin) DescEN() string      { return "Save messages and send them to a target" }
 
 func (p *SavePlugin) Init(_ context.Context, mgr plugin.Manager) error {
 	p.loadDB()
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "save",
-		Description: "保存/转发消息到指定目标",
+		Description: "保存消息到本地并发送到指定目标",
+		DescEN:      "Save messages and send them to a target",
 		Usage:       "save（回复）| save <链接…> | save to <目标> | save source on|off",
 		Plugin:      p.Name(),
 		Category:    "tools",
