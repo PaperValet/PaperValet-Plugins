@@ -29,7 +29,7 @@ var Metadata = &plugin.PluginMetadata{
 	Name:        "gt",
 	Description: "谷歌翻译",
 	DescEN:      "Google Translate",
-	Version:     "1.1.0",
+	Version:     "1.0.0",
 	Author:      "PaperValet",
 	MinVersion:  "0.1.0",
 }
