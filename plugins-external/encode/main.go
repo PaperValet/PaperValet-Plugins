@@ -17,6 +17,7 @@ func New() *EncodePlugin { return &EncodePlugin{} }
 
 func (p *EncodePlugin) Name() string        { return "encode" }
 func (p *EncodePlugin) Description() string { return "编码/解码工具" }
+func (p *EncodePlugin) DescEN() string      { return "Encode/decode utility" }
 
 func (p *EncodePlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	return mgr.RegisterCommand(&plugin.Command{
