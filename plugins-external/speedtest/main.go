@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"os/exec"
 
 	"github.com/TiaraBasori/PaperValet/pkg/plugin"
@@ -56,7 +55,7 @@ func (p *SpeedtestPlugin) handleSpeedtest(ctx *plugin.CommandContext) error {
 		}
 	}
 	if bin == "" {
-		return ctx.Edit("❌ 未找到 speedtest-cli/speedtest，请先安装（如 <code>apt install speedtest-cli</code>）")
+		return ctx.Edit("❌ 未找到 speedtest-cli/speedtest，请先安装（如 `apt install speedtest-cli`）")
 	}
 
 	args := []string{}
@@ -66,10 +65,10 @@ func (p *SpeedtestPlugin) handleSpeedtest(ctx *plugin.CommandContext) error {
 
 	out, err := exec.Command(bin, args...).CombinedOutput()
 	if err != nil {
-		return ctx.Edit(fmt.Sprintf("❌ 测速失败: %v\n<pre>%s</pre>", err, truncate(string(out), 1500)))
+		return ctx.Edit("❌ 测速失败: " + plugin.Escape(err.Error()) + "\n" + plugin.Pre(truncate(string(out), 1500)))
 	}
 
-	return ctx.Edit(fmt.Sprintf("🌐 <b>网络测速</b>\n\n模式: <code>%s</code>\n\n<pre>%s</pre>", mode, truncate(string(out), 3000)))
+	return ctx.Edit("🌐 **网络测速**\n\n模式: " + plugin.Code(mode) + "\n\n" + plugin.Pre(truncate(string(out), 3000)))
 }
 
 func truncate(s string, max int) string {
