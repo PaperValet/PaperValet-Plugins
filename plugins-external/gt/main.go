@@ -49,7 +49,6 @@ func (p *GtPlugin) DescEN() string      { return Metadata.DescEN }
 func (p *GtPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "gt",
-		Aliases:     []string{"translate", "翻译"},
 		Description: "谷歌翻译（默认译为中文，可指定目标语言，支持回复消息翻译）",
 		DescEN:      "Google Translate (Chinese by default, optional target language, works on replies)",
 		Usage:       "gt [目标语言] <文本> | 回复消息 gt [目标语言] | gt help",
