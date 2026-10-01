@@ -106,10 +106,13 @@ func (p *YourPlugin) Stop(ctx context.Context) error  { return nil }
 var Metadata *plugin.PluginMetadata = &PluginMetadata
 ```
 
-编译为 `.so`：
+编译为 `.so`（Go 版本必须和主程序一致，并在 workspace 里引用 PaperValet 源码，否则主程序会拒绝加载）：
 ```bash
-go build -buildmode=plugin -o your-plugin.so .
+go work init . ../../../PaperValet
+go build -trimpath -buildmode=plugin -o your-plugin.so .
 ```
+
+输出文本用 Telegram Markdown（`**粗体**`、`` `代码` ``、`[文字](链接)`），用户输入用 `plugin.Escape` / `plugin.Code` 包起来。
 
 发布到 GitHub Releases 即可通过 PPM 安装。
 
@@ -133,7 +136,7 @@ PaperValet-Plugins/
 
 GitHub Actions 自动：
 1. 检测 `plugins-external/*/main.go` 变更
-2. 编译 `go build -buildmode=plugin -o <name>.so`
+2. 在 workspace 里编译 `go build -trimpath -buildmode=plugin -o <name>.so`
 3. 发布到 GitHub Releases `latest`
 4. PPM 从 `https://github.com/TiaraBasori/PaperValet-Plugins/releases/latest/download/<name>.so` 下载
 
