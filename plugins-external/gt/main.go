@@ -24,6 +24,7 @@ func New() *GtPlugin {
 
 func (p *GtPlugin) Name() string        { return "gt" }
 func (p *GtPlugin) Description() string { return "谷歌翻译" }
+func (p *GtPlugin) DescEN() string      { return "Google Translate" }
 
 func (p *GtPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	return mgr.RegisterCommand(&plugin.Command{
