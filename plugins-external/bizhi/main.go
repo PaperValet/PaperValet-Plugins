@@ -69,7 +69,7 @@ func (p *BizhiPlugin) handleBizhi(ctx *plugin.CommandContext) error {
 	req.Header.Set("User-Agent", "Mozilla/5.0")
 	resp, err := p.http.Do(req)
 	if err != nil {
-		return ctx.Edit(fmt.Sprintf("❌ 壁纸下载失败: %v", err))
+		return ctx.Edit("❌ 壁纸下载失败: " + plugin.Escape(err.Error()))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -91,7 +91,7 @@ func (p *BizhiPlugin) handleBizhi(ctx *plugin.CommandContext) error {
 	f.Close()
 
 	if err := ctx.ReplyMedia(tmp, "🖼 随机壁纸"); err != nil {
-		return ctx.Edit(fmt.Sprintf("❌ 发送壁纸失败: %v", err))
+		return ctx.Edit("❌ 发送壁纸失败: " + plugin.Escape(err.Error()))
 	}
 	return ctx.Delete()
 }
