@@ -35,24 +35,21 @@ PaperValet 外部插件仓库 — 所有第三方插件源码统一维护在这�
 | fun | roll/coin/choose/8ball/fact | 娱乐命令 | `apt install fun` |
 | gt | gt | 谷歌翻译 | `apt install gt` |
 | hitokoto | hitokoto | 随机一言 | `apt install hitokoto` |
-| ids | ids | 显示用户/群组/消息 ID | `apt install ids` |
 | isalive | isalive | 检测 bot 运行状态 | `apt install isalive` |
 | ping | ping | 网络延迟测试 (TCP/HTTP/ICMP/DC) | `apt install ping` |
 | qr | qr | 二维码生成 | `apt install qr` |
 | qrcode | qrcode | 二维码生成/解码 (完整版) | `apt install qrcode` |
-| re | re | 消息复读机 | `apt install re` |
 | rev | rev | 文本反转 | `apt install rev` |
 | save | save | 突破限制保存/转发消息 | `apt install save` |
 | sendat | sendat | 定时消息发送 | `apt install sendat` |
 | speedtest | speedtest | 网络速度测试 | `apt install speedtest` |
-| tpm | tpm | 旧版插件管理器 | `apt install tpm` |
 | weather | weather | 天气查询 | `apt install weather` |
 
 ## 使用方法
 
 ### 安装插件
 ```bash
-apt install atadmins ids calc
+apt install atadmins calc
 ```
 
 ### 加载插件
