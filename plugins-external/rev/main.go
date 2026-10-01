@@ -14,13 +14,15 @@ func New() *RevPlugin { return &RevPlugin{} }
 
 func (p *RevPlugin) Name() string        { return "rev" }
 func (p *RevPlugin) Description() string { return "反转消息内容" }
+func (p *RevPlugin) DescEN() string      { return "Reverse message text" }
 
 func (p *RevPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	cmds := []*plugin.Command{
 		{
 			Name:        "rev",
 			Aliases:     []string{"reverse", "反转"},
-			Description: "反转文本内容",
+			Description: "反转消息内容",
+			DescEN:      "Reverse message text",
 			Usage:       "rev <文本>",
 			Plugin:      p.Name(),
 			Category:    "fun",
