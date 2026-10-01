@@ -30,7 +30,7 @@ var Metadata = &plugin.PluginMetadata{
 	Name:        "sendat",
 	Description: "定时发送消息",
 	DescEN:      "Send messages on a schedule",
-	Version:     "1.1.0",
+	Version:     "1.0.0",
 	Author:      "PaperValet",
 	MinVersion:  "0.1.0",
 }
