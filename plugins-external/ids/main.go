@@ -16,12 +16,14 @@ func New() *IDsPlugin { return &IDsPlugin{} }
 
 func (p *IDsPlugin) Name() string        { return "ids" }
 func (p *IDsPlugin) Description() string { return "获取用户/群组/消息 ID" }
+func (p *IDsPlugin) DescEN() string      { return "Show user/group/message IDs" }
 
 func (p *IDsPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "ids",
 		Aliases:     []string{"id", "getid"},
-		Description: "显示当前用户、群组、消息 ID；回复消息时显示对方信息",
+		Description: "获取用户/群组/消息 ID",
+		DescEN:      "Show user/group/message IDs",
 		Usage:       "ids",
 		Plugin:      p.Name(),
 		Category:    "tools",
