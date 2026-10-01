@@ -19,6 +19,7 @@ func New() (plugin.Plugin, error) {
 var Metadata = &plugin.PluginMetadata{
 	Name:        "re",
 	Description: "消息复读工具",
+	DescEN:      "Message repeater",
 	Version:     "1.0.0",
 	Author:      "PaperValet",
 	MinVersion:  "0.1.0",
@@ -26,6 +27,7 @@ var Metadata = &plugin.PluginMetadata{
 
 func (p *RePlugin) Name() string        { return "re" }
 func (p *RePlugin) Description() string { return "消息复读工具" }
+func (p *RePlugin) DescEN() string      { return "Message repeater" }
 
 func (p *RePlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	return mgr.RegisterCommand(&plugin.Command{
