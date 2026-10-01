@@ -382,17 +382,17 @@ func (p *SendAtPlugin) handle(ctx *plugin.CommandContext) error {
 		rest = ctx.Args[1:]
 	}
 	switch sub {
-	case "", "help", "h":
+	case "", "help":
 		return ctx.Edit(helpText(ctx))
-	case "list", "ls":
+	case "list":
 		return p.cmdList(ctx, len(rest) > 0 && strings.ToLower(rest[0]) == "all")
-	case "rm", "del", "delete", "remove":
+	case "rm":
 		return p.cmdChange(ctx, rest, "rm")
 	case "pause":
 		return p.cmdChange(ctx, rest, "pause")
 	case "resume":
 		return p.cmdChange(ctx, rest, "resume")
-	case "tz", "timezone":
+	case "tz":
 		return p.cmdTZ(ctx, rest)
 	}
 	return p.cmdAdd(ctx)
