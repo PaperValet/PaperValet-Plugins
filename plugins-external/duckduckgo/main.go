@@ -39,7 +39,7 @@ var Metadata = &plugin.PluginMetadata{
 	Name:        "duckduckgo",
 	Description: "DuckDuckGo 网页搜索",
 	DescEN:      "DuckDuckGo web search",
-	Version:     "1.1.1",
+	Version:     "1.0.0",
 	Author:      "PaperValet",
 	MinVersion:  "0.1.0",
 }
