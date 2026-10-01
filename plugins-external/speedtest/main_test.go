@@ -100,6 +100,20 @@ func TestMisc(t *testing.T) {
 	}
 }
 
+func TestCLIEnv(t *testing.T) {
+	keep := []string{"PATH=/bin", "HOME=/root"}
+	if got := cliEnv(keep); len(got) != 2 {
+		t.Errorf("HOME overridden: %v", got)
+	}
+	for _, env := range [][]string{{"PATH=/bin"}, {"PATH=/bin", "HOME="}} {
+		got := cliEnv(env)
+		last := got[len(got)-1]
+		if !strings.HasPrefix(last, "HOME=/") || !strings.HasSuffix(last, dataDir) {
+			t.Errorf("HOME not set: %v", got)
+		}
+	}
+}
+
 func TestFormatResult(t *testing.T) {
 	r, _ := parseOokla(ooklaSample)
 	out := formatResult("zh-CN", r, extraInfo{ip: ipInfo{asInfo: "AS24940", ccCode: "DE", ccFlag: "🇩🇪"}, mtu: 1500, rx: 1e9, tx: 2e9, haveTraffic: true})
