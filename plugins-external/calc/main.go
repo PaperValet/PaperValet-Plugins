@@ -36,14 +36,14 @@ func (p *CalcPlugin) Stop(ctx context.Context) error  { return nil }
 
 func (p *CalcPlugin) handleCalc(ctx *plugin.CommandContext) error {
 	if len(ctx.Args) == 0 {
-		return ctx.Edit("🧮 用法：<code>calc <表达式></code>\n支持 + - * / % ^ ( ) sqrt sin cos tan asin acos atan log ln abs floor ceil round，常量 pi e")
+		return ctx.Edit("🧮 用法：`calc <表达式>`\n支持 + - * / % ^ ( ) sqrt sin cos tan asin acos atan log ln abs floor ceil round，常量 pi e")
 	}
 	expr := strings.Join(ctx.Args, " ")
 
 	ps := &parser{s: expr}
 	v, err := ps.parseExpr()
 	if err != nil {
-		return ctx.Edit(fmt.Sprintf("❌ 表达式错误: %v", err))
+		return ctx.Edit("❌ 表达式错误: " + plugin.Escape(err.Error()))
 	}
 	ps.skipSpace()
 	if ps.pos < len(ps.s) {
@@ -51,7 +51,7 @@ func (p *CalcPlugin) handleCalc(ctx *plugin.CommandContext) error {
 	}
 
 	result := strconv.FormatFloat(v, 'g', 12, 64)
-	return ctx.Edit(fmt.Sprintf("🧮 <code>%s</code> = <b>%s</b>", expr, result))
+	return ctx.Edit("🧮 " + plugin.Code(expr) + " = **" + plugin.Escape(result) + "**")
 }
 
 // parser is a small recursive-descent math expression evaluator.
