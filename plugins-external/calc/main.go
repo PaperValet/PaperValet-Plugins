@@ -17,6 +17,7 @@ func New() *CalcPlugin { return &CalcPlugin{} }
 
 func (p *CalcPlugin) Name() string        { return "calc" }
 func (p *CalcPlugin) Description() string { return "计算器" }
+func (p *CalcPlugin) DescEN() string      { return "Calculator" }
 
 func (p *CalcPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	return mgr.RegisterCommand(&plugin.Command{
