@@ -60,7 +60,6 @@ func (p *BizhiPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	sweepStale()
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "bizhi",
-		Aliases:     []string{"wallpaper", "壁纸"},
 		Description: "随机获取一张高品质壁纸（wallhaven，btstu 备用）",
 		DescEN:      "Random high-quality wallpaper (wallhaven, btstu fallback)",
 		Usage:       "bizhi [meizi|dongman|fengjing|suiji] [-f] | bizhi help",
