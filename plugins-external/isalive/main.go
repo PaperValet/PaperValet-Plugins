@@ -11,14 +11,16 @@ type IsAlivePlugin struct{}
 func New() *IsAlivePlugin { return &IsAlivePlugin{} }
 
 func (p *IsAlivePlugin) Name() string        { return "isalive" }
-func (p *IsAlivePlugin) Description() string { return "活了么 - 检测 bot 是否在线" }
+func (p *IsAlivePlugin) Description() string { return "检测 bot 是否在线" }
+func (p *IsAlivePlugin) DescEN() string      { return "Check whether a bot is alive" }
 
 func (p *IsAlivePlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	cmds := []*plugin.Command{
 		{
 			Name:        "isalive",
 			Aliases:     []string{"alive", "活了么", "在吗"},
-			Description: "检测 bot 运行状态",
+			Description: "检测 bot 是否在线",
+			DescEN:      "Check whether a bot is alive",
 			Usage:       "isalive",
 			Plugin:      p.Name(),
 			Category:    "core",
