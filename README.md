@@ -6,20 +6,21 @@ PaperValet 外部插件仓库 — 所有第三方插件源码统一维护在这�
 
 | 插件 | 命令 | 说明 |
 |------|------|------|
-| core | version/ping/restart | 核心命令 |
+| core | ping/restart | 延迟检测、原地重启 |
 | help | help | 帮助系统 |
-| status | status | 运行状态 |
-| apt | apt | 插件包管理器 |
-| info | info/fwd | 信息查询与转发 |
+| status | status (version) | 版本与运行状态 |
+| apt | apt | 插件管理（search/list/install） |
+| info | info (ids) | ID 与跳转链接 |
+| re | re | 复读回复的消息 |
 | alias | alias | 命令别名 |
-| exec | exec | 执行系统命令 |
+| exec | exec | 执行 shell 命令 |
 | sudo | sudo | 权限委派 |
-| reload | reload | 外部插件热重载 |
+| reload | reload | 重新加载全部外部插件 |
 | log | loglevel/sendlog | 日志级别与发送 |
 | prefix | prefix | 前缀管理 |
-| backup | backup | 备份与恢复 |
-| update | update/autofix | 代码同步与修复 |
-| dme | dme/dme all | 消息清理 |
+| backup | backup | 配置备份到收藏夹 / 回复恢复 |
+| update | update | 从 Release 升级 |
+| dme | dme | 批量删除，带防撤回 |
 | lang | lang | 语言切换 |
 
 ## 外部插件（动态加载 .so）
