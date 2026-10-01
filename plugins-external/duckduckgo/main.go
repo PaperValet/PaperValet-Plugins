@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -56,7 +55,7 @@ type ddgResp struct {
 
 func (p *DuckDuckGoPlugin) handleSearch(ctx *plugin.CommandContext) error {
 	if len(ctx.Args) == 0 {
-		return ctx.Edit("🔍 用法：<code>duckduckgo <查询></code>")
+		return ctx.Edit("🔍 用法：`duckduckgo <查询>`")
 	}
 	query := strings.Join(ctx.Args, " ")
 
@@ -74,7 +73,7 @@ func (p *DuckDuckGoPlugin) handleSearch(ctx *plugin.CommandContext) error {
 	}
 	resp, err := p.http.Do(req)
 	if err != nil {
-		return ctx.Edit(fmt.Sprintf("❌ 搜索失败: %v", err))
+		return ctx.Edit("❌ 搜索失败: " + plugin.Escape(err.Error()))
 	}
 	defer resp.Body.Close()
 
@@ -84,18 +83,18 @@ func (p *DuckDuckGoPlugin) handleSearch(ctx *plugin.CommandContext) error {
 	}
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "🔍 <b>%s</b>\n\n", query)
+	sb.WriteString("🔍 " + plugin.Bold(query) + "\n\n")
 
 	switch {
 	case data.Answer != "":
-		fmt.Fprintf(&sb, "%s\n", data.Answer)
+		sb.WriteString(plugin.Escape(data.Answer) + "\n")
 	case data.AbstractText != "":
 		if data.Heading != "" {
-			fmt.Fprintf(&sb, "<b>%s</b>\n", data.Heading)
+			sb.WriteString(plugin.Bold(data.Heading) + "\n")
 		}
-		fmt.Fprintf(&sb, "%s\n", data.AbstractText)
+		sb.WriteString(plugin.Escape(data.AbstractText) + "\n")
 		if data.AbstractURL != "" {
-			fmt.Fprintf(&sb, "<a href=\"%s\">来源</a>\n", data.AbstractURL)
+			sb.WriteString(plugin.Link("来源", data.AbstractURL) + "\n")
 		}
 	default:
 		sb.WriteString("没有找到即时答案，试试更具体的关键词。\n")
@@ -115,9 +114,9 @@ func (p *DuckDuckGoPlugin) handleSearch(ctx *plugin.CommandContext) error {
 			continue
 		}
 		if count == 0 {
-			sb.WriteString("\n<b>相关结果</b>\n")
+			sb.WriteString("\n**相关结果**\n")
 		}
-		fmt.Fprintf(&sb, "• <a href=\"%s\">%s</a>\n", link, text)
+		sb.WriteString("• " + plugin.Link(text, link) + "\n")
 		count++
 	}
 	return ctx.Edit(sb.String())
