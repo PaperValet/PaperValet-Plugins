@@ -25,7 +25,7 @@ var Metadata = &plugin.PluginMetadata{
 	Name:        "hitokoto",
 	Description: "随机一言",
 	DescEN:      "Random quote (Hitokoto)",
-	Version:     "1.1.0",
+	Version:     "1.0.0",
 	Author:      "PaperValet",
 	MinVersion:  "0.1.0",
 }
