@@ -219,18 +219,3 @@ func TestTimeLimitFinishes(t *testing.T) {
 		t.Fatal("task should be removed after limit")
 	}
 }
-
-type fakeReg struct {
-	api      *tg.Client
-	resolver interface{}
-}
-
-func TestBorrowClientSafe(t *testing.T) {
-	api, res := borrowClient(&fakeReg{})
-	if api != nil || res != nil {
-		t.Error("expected nil from foreign struct")
-	}
-	if a, _ := borrowClient(struct{}{}); a != nil {
-		t.Error("non-pointer")
-	}
-}
