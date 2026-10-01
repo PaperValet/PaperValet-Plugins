@@ -69,12 +69,12 @@ func (p *PingPlugin) handlePing(ctx *plugin.CommandContext) error {
 		_ = ctx.Edit("🏓 Pong!")
 		msgLatency := time.Since(start)
 
-		return ctx.Edit(fmt.Sprintf(`🏓 <b>Pong!</b>
-
-📡 <b>API延迟:</b> <code>%dms</code>
-✏️ <b>消息延迟:</b> <code>%dms</code>
-
-⏰ <i>%s</i>`,
+		return ctx.Edit(fmt.Sprintf("🏓 **Pong!**\n"+
+			"\n"+
+			"📡 **API延迟:** `%dms`\n"+
+			"✏️ **消息延迟:** `%dms`\n"+
+			"\n"+
+			"⏰ _%s_",
 			apiLatency.Milliseconds(),
 			msgLatency.Milliseconds(),
 			time.Now().Format("2006-01-02 15:04:05"),
@@ -82,22 +82,22 @@ func (p *PingPlugin) handlePing(ctx *plugin.CommandContext) error {
 	}
 
 	if target == "help" || target == "h" {
-		return ctx.Edit(`🏓 <b>Ping工具使用说明</b>
-
-<b>基础用法:</b>
-• <code>.ping</code> - Telegram API延迟测试
-• <code>.ping all</code> - 所有数据中心延迟
-• <code>.ping dc1</code> - 指定数据中心
-
-<b>网络测试:</b>
-• <code>.ping 8.8.8.8</code> - IP地址ping
-• <code>.ping google.com</code> - 域名ping
-• <code>.ping dc1-dc5</code> - Telegram数据中心
-
-<b>支持的数据中心:</b>
-• DC1/DC3: Miami
-• DC2/DC4: Amsterdam
-• DC5: Singapore`)
+		return ctx.Edit("🏓 **Ping工具使用说明**\n" +
+			"\n" +
+			"**基础用法:**\n" +
+			"• `.ping` - Telegram API延迟测试\n" +
+			"• `.ping all` - 所有数据中心延迟\n" +
+			"• `.ping dc1` - 指定数据中心\n" +
+			"\n" +
+			"**网络测试:**\n" +
+			"• `.ping 8.8.8.8` - IP地址ping\n" +
+			"• `.ping google.com` - 域名ping\n" +
+			"• `.ping dc1-dc5` - Telegram数据中心\n" +
+			"\n" +
+			"**支持的数据中心:**\n" +
+			"• DC1/DC3: Miami\n" +
+			"• DC2/DC4: Amsterdam\n" +
+			"• DC5: Singapore")
 	}
 
 	if target == "all" || target == "dc" {
@@ -134,17 +134,17 @@ func (p *PingPlugin) pingAllDCs(ctx *plugin.CommandContext) error {
 		}
 
 		if latency >= 0 {
-			results = append(results, fmt.Sprintf("🌐 <b>DC%d (%s):</b> <code>%dms</code>", dc, location, latency))
+			results = append(results, fmt.Sprintf("🌐 **DC%d (%s):** `%dms`", dc, location, latency))
 		} else {
-			results = append(results, fmt.Sprintf("🌐 <b>DC%d (%s):</b> <code>超时</code>", dc, location))
+			results = append(results, fmt.Sprintf("🌐 **DC%d (%s):** `超时`", dc, location))
 		}
 	}
 
-	return ctx.Edit(fmt.Sprintf(`🌐 <b>Telegram数据中心延迟</b>
+	return ctx.Edit(fmt.Sprintf(`🌐 **Telegram数据中心延迟**
 
 %s
 
-⏰ <i>%s</i>`, strings.Join(results, "\n"), time.Now().Format("2006-01-02 15:04:05")))
+⏰ _%s_`, strings.Join(results, "\n"), time.Now().Format("2006-01-02 15:04:05")))
 }
 
 func (p *PingPlugin) pingDC(ctx *plugin.CommandContext, dc int) error {
@@ -163,13 +163,13 @@ func (p *PingPlugin) pingDC(ctx *plugin.CommandContext, dc int) error {
 	latency := p.tcpPing(ip, 443, 5*time.Second)
 
 	if latency >= 0 {
-		return ctx.Edit(fmt.Sprintf("🌐 <b>DC%d (%s):</b> <code>%dms</code>", dc, location, latency))
+		return ctx.Edit(fmt.Sprintf("🌐 **DC%d (%s):** `%dms`", dc, location, latency))
 	}
-	return ctx.Edit(fmt.Sprintf("🌐 <b>DC%d (%s):</b> <code>超时</code>", dc, location))
+	return ctx.Edit(fmt.Sprintf("🌐 **DC%d (%s):** `超时`", dc, location))
 }
 
 func (p *PingPlugin) pingTarget(ctx *plugin.CommandContext, target string) error {
-	_ = ctx.Edit(fmt.Sprintf("🔍 正在测试 <code>%s</code>...", target))
+	_ = ctx.Edit("🔍 正在测试 " + plugin.Code(target) + "...")
 
 	// Parse target (IP or domain)
 	parsed := p.parseTarget(target)
@@ -182,39 +182,39 @@ func (p *PingPlugin) pingTarget(ctx *plugin.CommandContext, target string) error
 	ips, err := net.LookupIP(testTarget)
 	dnsTime := time.Since(dnsStart)
 	if err == nil && len(ips) > 0 {
-		results = append(results, fmt.Sprintf("🔍 <b>DNS解析:</b> <code>%dms</code> → <code>%s</code>", dnsTime.Milliseconds(), ips[0].String()))
+		results = append(results, fmt.Sprintf("🔍 **DNS解析:** `%dms` → %s", dnsTime.Milliseconds(), plugin.Code(ips[0].String())))
 		testTarget = ips[0].String()
 	}
 
 	// TCP ping (port 80)
 	tcp80 := p.tcpPing(testTarget, 80, 5*time.Second)
 	if tcp80 >= 0 {
-		results = append(results, fmt.Sprintf("🌐 <b>TCP连接 (80):</b> <code>%dms</code>", tcp80))
+		results = append(results, fmt.Sprintf("🌐 **TCP连接 (80):** `%dms`", tcp80))
 	}
 
 	// TCP ping (port 443)
 	tcp443 := p.tcpPing(testTarget, 443, 5*time.Second)
 	if tcp443 >= 0 {
-		results = append(results, fmt.Sprintf("🔒 <b>TCP连接 (443):</b> <code>%dms</code>", tcp443))
+		results = append(results, fmt.Sprintf("🔒 **TCP连接 (443):** `%dms`", tcp443))
 	}
 
 	// HTTP ping
 	httpTime := p.httpPing(testTarget, false)
 	if httpTime >= 0 {
-		results = append(results, fmt.Sprintf("📡 <b>HTTP Ping:</b> <code>%dms</code>", httpTime))
+		results = append(results, fmt.Sprintf("📡 **HTTP Ping:** `%dms`", httpTime))
 	}
 
 	// HTTPS ping
 	httpsTime := p.httpPing(testTarget, true)
 	if httpsTime >= 0 {
-		results = append(results, fmt.Sprintf("📡 <b>HTTPS Ping:</b> <code>%dms</code>", httpsTime))
+		results = append(results, fmt.Sprintf("📡 **HTTPS Ping:** `%dms`", httpsTime))
 	}
 
 	// System ping (ICMP)
 	if parsed.typeStr != "dc" {
 		icmpTime := p.systemPing(testTarget)
 		if icmpTime >= 0 {
-			results = append(results, fmt.Sprintf("🏓 <b>ICMP Ping:</b> <code>%dms</code>", icmpTime))
+			results = append(results, fmt.Sprintf("🏓 **ICMP Ping:** `%dms`", icmpTime))
 		}
 	}
 
@@ -227,18 +227,18 @@ func (p *PingPlugin) pingTarget(ctx *plugin.CommandContext, target string) error
 
 	display := ""
 	if target == testTarget {
-		display = fmt.Sprintf("<code>%s</code>\n\n", target)
+		display = plugin.Code(target) + "\n\n"
 	} else {
-		display = fmt.Sprintf("<code>%s</code> → <code>%s</code>\n\n", target, testTarget)
+		display = plugin.Code(target) + " → " + plugin.Code(testTarget) + "\n\n"
 	}
 
 	if len(results) == 0 {
 		results = append(results, "❌ 所有测试均失败，目标可能不可达")
 	}
 
-	return ctx.Edit(fmt.Sprintf(`🎯 <b>%s延迟测试</b>
+	return ctx.Edit(fmt.Sprintf(`🎯 **%s延迟测试**
 %s%s
-⏰ <i>%s</i>`, targetType, display, strings.Join(results, "\n"), time.Now().Format("2006-01-02 15:04:05")))
+⏰ _%s_`, targetType, display, strings.Join(results, "\n"), time.Now().Format("2006-01-02 15:04:05")))
 }
 
 type parsedTarget struct {
