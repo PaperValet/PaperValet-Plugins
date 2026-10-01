@@ -58,7 +58,7 @@ func (p *SpeedtestPlugin) DescEN() string      { return "Network speed test (Spe
 func (p *SpeedtestPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "speedtest",
-		Aliases:     []string{"st", "网速", "speed"},
+		Aliases:     []string{"st"},
 		Description: "网络速度测试（Ookla CLI，自动下载）",
 		DescEN:      "Network speed test (Ookla CLI, auto-downloaded)",
 		Usage:       "speedtest [服务器ID|list|best|test <ID>|set <ID>|clear|type <photo|sticker|file|txt>|config|check|diagnose|fix|update|help] [--system|-s]",
