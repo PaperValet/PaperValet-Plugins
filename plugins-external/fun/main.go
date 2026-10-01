@@ -72,7 +72,7 @@ func (p *FunPlugin) handleChoose(ctx *plugin.CommandContext) error {
 		return ctx.Edit("用法: choose <选项1> <选项2> ...")
 	}
 	choice := ctx.Args[rand.Intn(len(ctx.Args))]
-	return ctx.Edit(fmt.Sprintf("🤔 我选: %s", choice))
+	return ctx.Edit("🤔 我选: " + plugin.Escape(choice))
 }
 
 func (p *FunPlugin) handle8ball(ctx *plugin.CommandContext) error {
