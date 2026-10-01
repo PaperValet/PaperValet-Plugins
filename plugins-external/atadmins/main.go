@@ -50,7 +50,6 @@ func (p *AtAdminsPlugin) DescEN() string      { return Metadata.DescEN }
 func (p *AtAdminsPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "atadmins",
-		Aliases:     []string{"calladmins", "管理员"},
 		Description: "一键艾特群组内全部管理员，可附带消息，回复消息时召唤到该消息",
 		DescEN:      "Mention every admin in the group, with an optional message; replies to the replied message",
 		Usage:       "atadmins [消息内容] | atadmins help",
