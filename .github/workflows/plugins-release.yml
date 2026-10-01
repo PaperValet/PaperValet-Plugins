@@ -5,6 +5,7 @@ on:
     branches: [main, master]
     paths:
       - 'plugins-external/**'
+      - 'scripts/**'
       - '.github/workflows/plugins-release.yml'
   workflow_dispatch:
     inputs:
@@ -91,6 +92,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate plugin index
+        run: python3 scripts/gen-registry.py plugins.json
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -105,7 +112,9 @@ jobs:
           body: |
             Auto-built external plugins for PaperValet.
             Install with: `apt install <plugin-name>`
-          files: artifacts/**/*.so
+          files: |
+            artifacts/**/*.so
+            plugins.json
           draft: false
           prerelease: false
           make_latest: true
