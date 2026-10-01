@@ -44,7 +44,6 @@ func (p *RevPlugin) DescEN() string { return "Reverse text (keeps formatting) or
 func (p *RevPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "rev",
-		Aliases:     []string{"reverse", "反转"},
 		Description: "反转文字（逐行，保留格式）；回复图片/GIF/贴纸可翻转或反色",
 		DescEN:      "Reverse text per line keeping formatting; reply to image/GIF/sticker to flip or invert",
 		Usage:       "rev [文字] | 回复消息 rev [h|v] [c]",
