@@ -20,7 +20,7 @@ Never commit `go.work`, `go.sum` or `.so` files (all gitignored).
 
 - `var Metadata = &plugin.PluginMetadata{...}` with `Name` matching the directory and `Name()`, plus `Description`, `DescEN`, `Version`, `Author`. `scripts/gen-registry.py` turns it into `plugins.json`, which `apt` reads.
 - Every command sets `Description`, `DescEN`, `Usage`, `UsageEN`, and answers `<command> help`.
-- No `Aliases` unless the name is long.
+- No `Aliases`, and one spelling per subcommand (`list`, not `list`/`ls`). Users make shortcuts with `.alias`.
 - Persistent state in `data/<name>/` via `mgr.Host().DataDir`. Goroutines stop in `Stop`.
 - Only import `github.com/TiaraBasori/PaperValet/pkg/plugin`. If the SDK lacks something, add it to PaperValet first.
 - Tests cover parsing and pure logic; nothing in tests touches the network.
