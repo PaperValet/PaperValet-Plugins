@@ -19,6 +19,7 @@ func New() (plugin.Plugin, error) {
 var Metadata = &plugin.PluginMetadata{
 	Name:        "account",
 	Description: "账号资料管理（用户名/昵称/简介/头像）",
+	DescEN:      "Manage your profile (username/name/bio/avatar)",
 	Version:     "1.0.0",
 	Author:      "PaperValet",
 	MinVersion:  "0.1.0",
