@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gotd/td/telegram/message/entity"
-	"github.com/gotd/td/telegram/message/html"
 	"github.com/gotd/td/tg"
 
 	"github.com/TiaraBasori/PaperValet/pkg/plugin"
@@ -42,12 +40,12 @@ func (p *AtAdminsPlugin) handleAtAdmins(ctx *plugin.CommandContext) error {
 	}
 	peer, err := ctx.ResolvePeer()
 	if err != nil {
-		return ctx.Edit(fmt.Sprintf("❌ 会话解析失败: %v", err))
+		return ctx.Edit("❌ 会话解析失败: " + plugin.Escape(err.Error()))
 	}
 
 	users, err := fetchAdmins(ctx, peer)
 	if err != nil {
-		return ctx.Edit(fmt.Sprintf("❌ 获取管理员列表失败: %v", err))
+		return ctx.Edit("❌ 获取管理员列表失败: " + plugin.Escape(err.Error()))
 	}
 	if len(users) == 0 {
 		return ctx.Edit("❌ 未找到管理员（或当前会话不是群组）")
@@ -72,13 +70,13 @@ func (p *AtAdminsPlugin) handleAtAdmins(ctx *plugin.CommandContext) error {
 		if name == "" {
 			name = fmt.Sprintf("user%d", u.ID)
 		}
-		fmt.Fprintf(&mentions, `<a href="tg://user?id=%d">%s</a> `, u.ID, name)
+		mentions.WriteString(plugin.Mention(name, u.ID) + " ")
 	}
 	if len(byID) == 0 {
 		return ctx.Edit("❌ 可艾特的管理员为空")
 	}
 
-	full := "📢 " + msg + "\n\n" + mentions.String()
+	full := "📢 " + plugin.Escape(msg) + "\n\n" + mentions.String()
 
 	// Build entities with a resolver backed by the admin list.
 	resolver := func(id int64) (tg.InputUserClass, error) {
@@ -87,14 +85,7 @@ func (p *AtAdminsPlugin) handleAtAdmins(ctx *plugin.CommandContext) error {
 		}
 		return nil, fmt.Errorf("unknown user %d", id)
 	}
-	var b entity.Builder
-	var text string
-	var entities []tg.MessageEntityClass
-	if err := html.HTML(strings.NewReader(full), &b, html.Options{UserResolver: resolver}); err != nil {
-		text = full // fall back to plain text
-	} else {
-		text, entities = b.Complete()
-	}
+	text, entities := plugin.ParseMarkdown(full, resolver)
 
 	req := &tg.MessagesSendMessageRequest{
 		Peer:     peer,
@@ -105,7 +96,7 @@ func (p *AtAdminsPlugin) handleAtAdmins(ctx *plugin.CommandContext) error {
 		req.SetEntities(entities)
 	}
 	if _, err := ctx.API.MessagesSendMessage(ctx.Context(), req); err != nil {
-		return ctx.Edit(fmt.Sprintf("❌ 发送失败: %v", err))
+		return ctx.Edit("❌ 发送失败: " + plugin.Escape(err.Error()))
 	}
 	return ctx.Delete()
 }
