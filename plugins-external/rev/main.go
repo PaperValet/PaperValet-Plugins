@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/TiaraBasori/PaperValet/pkg/plugin"
@@ -43,13 +42,13 @@ func (p *RevPlugin) Stop(ctx context.Context) error  { return nil }
 
 func (p *RevPlugin) handleRev(ctx *plugin.CommandContext) error {
 	if len(ctx.Args) == 0 {
-		return ctx.Edit(`🔄 <b>文本反转</b>
-
-用法: <code>rev <文本></code>
-
-示例:
-• <code>rev Hello World</code> → <code>dlroW olleH</code>
-• <code>rev 你好世界</code> → <code>界世好你</code>`)
+		return ctx.Edit("🔄 **文本反转**\n" +
+			"\n" +
+			"用法: `rev <文本>`\n" +
+			"\n" +
+			"示例:\n" +
+			"• `rev Hello World` → `dlroW olleH`\n" +
+			"• `rev 你好世界` → `界世好你`")
 	}
 
 	text := strings.Join(ctx.Args, " ")
@@ -59,8 +58,5 @@ func (p *RevPlugin) handleRev(ctx *plugin.CommandContext) error {
 	}
 	reversed := string(runes)
 
-	return ctx.Edit(fmt.Sprintf(`🔄 <b>反转结果</b>
-
-原文: <code>%s</code>
-反转: <code>%s</code>`, text, reversed))
+	return ctx.Edit("🔄 **反转结果**\n\n原文: " + plugin.Code(text) + "\n反转: " + plugin.Code(reversed))
 }
