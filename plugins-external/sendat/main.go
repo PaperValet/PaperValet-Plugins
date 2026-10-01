@@ -6,14 +6,12 @@ import (
 	"encoding/binary"
 	"fmt"
 	"path/filepath"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 	_ "time/tzdata" // timezone names work without system tzdata
-	"unsafe"
 
 	"github.com/gotd/td/tg"
 
@@ -63,13 +61,13 @@ func (p *SendAtPlugin) Description() string { return Metadata.Description }
 func (p *SendAtPlugin) DescEN() string      { return Metadata.DescEN }
 
 func (p *SendAtPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
-	// Restored tasks must be able to send before any command runs, but the
-	// SDK only hands out the API client inside command handlers. Borrow the
-	// command registry's client (type-checked; falls back to capturing it
-	// from the first sendat command).
+	// Restored tasks must send before any command runs, so take the
+	// long-lived client from the host instead of a command context.
 	if mgr != nil {
-		if rp := mgr.Commands(); rp != nil {
-			p.api, p.resolver = borrowClient(rp)
+		if h := mgr.Host(); h != nil {
+			p.mu.Lock()
+			p.api, p.resolver, p.logger = h.API(), h.PeerResolver(), h.Logger(p.Name())
+			p.mu.Unlock()
 		}
 	}
 	return mgr.RegisterCommand(&plugin.Command{
@@ -726,28 +724,6 @@ func (p *SendAtPlugin) cmdTZ(ctx *plugin.CommandContext, args []string) error {
 }
 
 // ---------------------------------------------------------------- helpers
-
-// borrowClient reads the API client and peer resolver held by the host's
-// command registry. Fields are type-checked so a host change just yields nil.
-func borrowClient(rp any) (api *tg.Client, resolver plugin.PeerResolver) {
-	defer func() {
-		if recover() != nil {
-			api, resolver = nil, nil
-		}
-	}()
-	v := reflect.ValueOf(rp)
-	if v.Kind() != reflect.Ptr || v.IsNil() || v.Elem().Kind() != reflect.Struct {
-		return nil, nil
-	}
-	v = v.Elem()
-	if f := v.FieldByName("api"); f.IsValid() && f.Type() == reflect.TypeOf((*tg.Client)(nil)) {
-		api, _ = reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem().Interface().(*tg.Client)
-	}
-	if f := v.FieldByName("resolver"); f.IsValid() && f.Type() == reflect.TypeOf((*plugin.PeerResolver)(nil)).Elem() {
-		resolver, _ = reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem().Interface().(plugin.PeerResolver)
-	}
-	return api, resolver
-}
 
 func randomID() int64 {
 	var b [8]byte
