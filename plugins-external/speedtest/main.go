@@ -34,7 +34,7 @@ var Metadata = &plugin.PluginMetadata{
 	Name:        "speedtest",
 	Description: "网络速度测试（Speedtest by Ookla）",
 	DescEN:      "Network speed test (Speedtest by Ookla)",
-	Version:     "1.1.0",
+	Version:     "1.1.1",
 	Author:      "PaperValet",
 	MinVersion:  "0.1.0",
 }
@@ -58,6 +58,7 @@ func (p *SpeedtestPlugin) DescEN() string      { return "Network speed test (Spe
 func (p *SpeedtestPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "speedtest",
+		Aliases:     []string{"st"},
 		Description: "网络速度测试（Ookla CLI，自动下载）",
 		DescEN:      "Network speed test (Ookla CLI, auto-downloaded)",
 		Usage:       "speedtest [服务器ID|list|best|test <ID>|set <ID>|clear|type <photo|sticker|file|txt>|config|check|diagnose|fix|update|help] [--system|-s]",
@@ -166,7 +167,7 @@ func helpText(ctx *plugin.CommandContext) string {
 	return ctx.Tlocal(
 		header+
 			"**用法**\n"+
-			"• `speedtest` — 开始速度测试\n"+
+			"• `speedtest` — 开始速度测试（简写 `st`）\n"+
 			"• `speedtest [服务器ID]` — 使用指定服务器测试\n"+
 			"• `speedtest list` — 显示附近服务器列表\n"+
 			"• `speedtest best` — 查找推荐服务器（按延迟）\n"+
@@ -184,7 +185,7 @@ func helpText(ctx *plugin.CommandContext) string {
 			"💡 CLI 自动下载到 data/speedtest/",
 		header+
 			"**Usage**\n"+
-			"• `speedtest` — run a speed test\n"+
+			"• `speedtest` — run a speed test (short: `st`)\n"+
 			"• `speedtest [serverID]` — test against a server\n"+
 			"• `speedtest list` — nearby servers\n"+
 			"• `speedtest best` — recommended servers (by latency)\n"+
