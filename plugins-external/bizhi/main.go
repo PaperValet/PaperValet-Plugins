@@ -141,9 +141,9 @@ func (p *BizhiPlugin) handleBizhi(ctx *plugin.CommandContext) error {
 	sendAsFile := false
 	for _, a := range ctx.Args {
 		switch strings.ToLower(a) {
-		case "help", "h", "-h", "--help":
+		case "help":
 			return ctx.Edit(p.help(ctx))
-		case "-f", "--file", "-file":
+		case "-f":
 			sendAsFile = true
 		default:
 			if !strings.HasPrefix(a, "-") {
