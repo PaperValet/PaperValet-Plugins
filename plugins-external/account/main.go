@@ -55,12 +55,12 @@ func (p *AccountPlugin) handleUsername(ctx *plugin.CommandContext) error {
 	}
 	_, err := ctx.API.AccountUpdateUsername(ctx.Context(), newName)
 	if err != nil {
-		return ctx.Edit(fmt.Sprintf("❌ 设置失败: %v", err))
+		return ctx.Edit("❌ 设置失败: " + plugin.Escape(err.Error()))
 	}
 	if newName == "" {
 		return ctx.Edit("✅ 用户名已清空")
 	}
-	return ctx.Edit(fmt.Sprintf("✅ 用户名已设为 @%s", newName))
+	return ctx.Edit("✅ 用户名已设为 @" + plugin.Escape(newName))
 }
 
 func (p *AccountPlugin) handleName(ctx *plugin.CommandContext) error {
@@ -77,24 +77,24 @@ func (p *AccountPlugin) handleName(ctx *plugin.CommandContext) error {
 		LastName:  last,
 	})
 	if err != nil {
-		return ctx.Edit(fmt.Sprintf("❌ 设置失败: %v", err))
+		return ctx.Edit("❌ 设置失败: " + plugin.Escape(err.Error()))
 	}
 	if last != "" {
-		return ctx.Edit(fmt.Sprintf("✅ 昵称已设为 %s %s", first, last))
+		return ctx.Edit("✅ 昵称已设为 " + plugin.Escape(first+" "+last))
 	}
-	return ctx.Edit(fmt.Sprintf("✅ 昵称已设为 %s", first))
+	return ctx.Edit("✅ 昵称已设为 " + plugin.Escape(first))
 }
 
 func (p *AccountPlugin) handleBio(ctx *plugin.CommandContext) error {
 	bio := ctx.RawArgs
 	_, err := ctx.API.AccountUpdateProfile(ctx.Context(), &tg.AccountUpdateProfileRequest{About: bio})
 	if err != nil {
-		return ctx.Edit(fmt.Sprintf("❌ 设置失败: %v", err))
+		return ctx.Edit("❌ 设置失败: " + plugin.Escape(err.Error()))
 	}
 	if bio == "" {
 		return ctx.Edit("✅ 简介已清空")
 	}
-	return ctx.Edit(fmt.Sprintf("✅ 简介已设为: %s", bio))
+	return ctx.Edit("✅ 简介已设为: " + plugin.Escape(bio))
 }
 
 func (p *AccountPlugin) handleRmPfp(ctx *plugin.CommandContext) error {
@@ -112,7 +112,7 @@ func (p *AccountPlugin) handleRmPfp(ctx *plugin.CommandContext) error {
 		Limit:  limit,
 	})
 	if err != nil {
-		return ctx.Edit(fmt.Sprintf("❌ 获取头像失败: %v", err))
+		return ctx.Edit("❌ 获取头像失败: " + plugin.Escape(err.Error()))
 	}
 
 	var inputPhotos []tg.InputPhotoClass
@@ -129,7 +129,7 @@ func (p *AccountPlugin) handleRmPfp(ctx *plugin.CommandContext) error {
 		return ctx.Edit("没有头像可删除")
 	}
 	if _, err := ctx.API.PhotosDeletePhotos(ctx.Context(), inputPhotos); err != nil {
-		return ctx.Edit(fmt.Sprintf("❌ 删除失败: %v", err))
+		return ctx.Edit("❌ 删除失败: " + plugin.Escape(err.Error()))
 	}
 	return ctx.Edit(fmt.Sprintf("✅ 已删除 %d 张头像", len(inputPhotos)))
 }
