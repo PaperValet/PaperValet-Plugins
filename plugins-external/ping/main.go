@@ -61,7 +61,6 @@ func (p *PingPlugin) Stop(ctx context.Context) error  { return nil }
 func (p *PingPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "ping",
-		Aliases:     []string{},
 		Description: "网络延迟测试（Telegram API / 数据中心 / IP / 域名）",
 		DescEN:      "Latency test (Telegram API / DCs / IP / domain)",
 		Usage:       "ping [all|dc1-dc5|<IP/域名>|help]",
