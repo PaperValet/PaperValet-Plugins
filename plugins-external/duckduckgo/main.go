@@ -22,6 +22,7 @@ func New() *DuckDuckGoPlugin {
 
 func (p *DuckDuckGoPlugin) Name() string        { return "duckduckgo" }
 func (p *DuckDuckGoPlugin) Description() string { return "DuckDuckGo 搜索" }
+func (p *DuckDuckGoPlugin) DescEN() string      { return "DuckDuckGo search" }
 
 func (p *DuckDuckGoPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	return mgr.RegisterCommand(&plugin.Command{
