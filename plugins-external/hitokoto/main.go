@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -55,7 +54,7 @@ func (p *HitokotoPlugin) handleHitokoto(ctx *plugin.CommandContext) error {
 	if len(ctx.Args) > 0 {
 		cat = strings.ToLower(ctx.Args[0])
 		if _, ok := validCategories[cat]; !ok {
-			return ctx.Edit("❌ 无效分类，可选 a-l：<code>" + catList() + "</code>")
+			return ctx.Edit("❌ 无效分类，可选 a-l：" + plugin.Code(catList()))
 		}
 	}
 
@@ -70,7 +69,7 @@ func (p *HitokotoPlugin) handleHitokoto(ctx *plugin.CommandContext) error {
 	}
 	resp, err := p.http.Do(req)
 	if err != nil {
-		return ctx.Edit(fmt.Sprintf("❌ 请求一言 API 失败: %v", err))
+		return ctx.Edit("❌ 请求一言 API 失败: " + plugin.Escape(err.Error()))
 	}
 	defer resp.Body.Close()
 
@@ -90,7 +89,7 @@ func (p *HitokotoPlugin) handleHitokoto(ctx *plugin.CommandContext) error {
 	if source != "" {
 		out += "\n\n—— " + source
 	}
-	return ctx.Edit(out)
+	return ctx.Edit(plugin.Escape(out))
 }
 
 func catList() string {
