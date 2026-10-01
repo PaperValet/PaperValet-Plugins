@@ -74,6 +74,11 @@ jobs:
         working-directory: ${{ matrix.plugin-dir }}
         run: |
           go mod tidy
+          # Build inside a workspace so PaperValet is a main module, exactly
+          # like in the bot's own build. Through a replace directive -trimpath
+          # records pkg/plugin as PaperValet@v0.1.0/... and the bot refuses
+          # to load the .so with "different version of package".
+          go work init . "$GITHUB_WORKSPACE/../PaperValet"
           go test ./...
           go vet ./...
           go build -trimpath -buildmode=plugin -o ../../${{ steps.meta.outputs.name }}.so .
