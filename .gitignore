@@ -19,3 +19,6 @@ build/
 
 # PaperValet clone (from CI)
 /tmp/PaperValet/
+# Local workspaces
+go.work
+go.work.sum
