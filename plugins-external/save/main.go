@@ -212,7 +212,7 @@ func (p *SavePlugin) handle(ctx *plugin.CommandContext) error {
 		sub = strings.ToLower(args[0])
 	}
 	switch sub {
-	case "help", "h":
+	case "help":
 		if len(args) == 1 {
 			return ctx.Edit(helpText(ctx))
 		}
@@ -275,9 +275,9 @@ func (p *SavePlugin) cmdSource(ctx *plugin.CommandContext, args []string) error 
 	}
 	var on bool
 	switch strings.ToLower(args[0]) {
-	case "on", "true", "1", "yes", "开":
+	case "on":
 		on = true
-	case "off", "false", "0", "no", "关":
+	case "off":
 		on = false
 	default:
 		return ctx.Edit("❌ " + tl("无效的参数，使用 ", "Invalid argument, use ") + plugin.Code("save source on|off"))
