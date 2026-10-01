@@ -31,6 +31,7 @@ func New() (plugin.Plugin, error) {
 var Metadata = &plugin.PluginMetadata{
 	Name:        "ping",
 	Description: "网络延迟测试工具",
+	DescEN:      "Network latency tool",
 	Version:     "1.0.0",
 	Author:      "PaperValet",
 	MinVersion:  "0.1.0",
@@ -38,6 +39,7 @@ var Metadata = &plugin.PluginMetadata{
 
 func (p *PingPlugin) Name() string        { return "ping" }
 func (p *PingPlugin) Description() string { return "网络延迟测试工具" }
+func (p *PingPlugin) DescEN() string      { return "Network latency tool" }
 
 func (p *PingPlugin) Start(ctx context.Context) error { return nil }
 func (p *PingPlugin) Stop(ctx context.Context) error  { return nil }
