@@ -22,6 +22,7 @@ func New() *WeatherPlugin {
 
 func (p *WeatherPlugin) Name() string        { return "weather" }
 func (p *WeatherPlugin) Description() string { return "天气查询" }
+func (p *WeatherPlugin) DescEN() string      { return "Weather lookup" }
 
 func (p *WeatherPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	return mgr.RegisterCommand(&plugin.Command{
