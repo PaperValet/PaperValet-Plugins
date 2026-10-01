@@ -38,7 +38,7 @@ var Metadata = &plugin.PluginMetadata{
 	Name:        "bizhi",
 	Description: "随机高品质壁纸",
 	DescEN:      "Random high-quality wallpaper",
-	Version:     "1.1.0",
+	Version:     "1.0.0",
 	Author:      "PaperValet",
 	MinVersion:  "0.1.0",
 }
