@@ -22,6 +22,7 @@ func New() (plugin.Plugin, error) {
 var Metadata = &plugin.PluginMetadata{
 	Name:        "qrcode",
 	Description: "二维码生成器",
+	DescEN:      "QR code generator",
 	Version:     "1.0.0",
 	Author:      "PaperValet",
 	MinVersion:  "0.1.0",
@@ -29,6 +30,7 @@ var Metadata = &plugin.PluginMetadata{
 
 func (p *QRCodePlugin) Name() string        { return "qrcode" }
 func (p *QRCodePlugin) Description() string { return "二维码生成器" }
+func (p *QRCodePlugin) DescEN() string      { return "QR code generator" }
 
 func (p *QRCodePlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	return mgr.RegisterCommand(&plugin.Command{
