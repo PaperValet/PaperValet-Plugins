@@ -57,7 +57,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version: '1.25.14' # must match PaperValet's GO_VERSION exactly
           cache: false
 
       - name: Setup PaperValet (for replace directive)
@@ -76,7 +76,7 @@ jobs:
           go mod tidy
           go test ./...
           go vet ./...
-          go build -buildmode=plugin -o ../../${{ steps.meta.outputs.name }}.so .
+          go build -trimpath -buildmode=plugin -o ../../${{ steps.meta.outputs.name }}.so .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
