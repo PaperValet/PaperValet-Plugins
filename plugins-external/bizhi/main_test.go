@@ -64,3 +64,18 @@ func TestCleanup(t *testing.T) {
 		t.Fatal("dataDir removed")
 	}
 }
+
+func TestCategoryChoices(t *testing.T) {
+	cs := categoryChoices()
+	if len(cs) != 5 || cs[0].Value != "" {
+		t.Fatalf("%+v", cs)
+	}
+	for _, c := range cs {
+		if c.Value == "" {
+			continue
+		}
+		if _, ok := categories[c.Value]; !ok {
+			t.Fatalf("choice %s not a category", c.Value)
+		}
+	}
+}
