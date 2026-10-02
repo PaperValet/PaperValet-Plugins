@@ -238,3 +238,24 @@ func TestStopIdempotent(t *testing.T) {
 		done()
 	}
 }
+
+func TestPanelTargetValidation(t *testing.T) {
+	for _, ok := range []string{"me", "local", "@user", "123456", "-1001234567890", "https://t.me/durov"} {
+		if _, err := validPanelTarget(ok); err != nil {
+			t.Fatalf("%q rejected: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"nope!", "@x", "hello world"} {
+		if _, err := validPanelTarget(bad); err == nil {
+			t.Fatalf("%q accepted", bad)
+		}
+	}
+}
+
+func TestOwnerUsesPanelDefaults(t *testing.T) {
+	p := New()
+	// Without a settings store the legacy default applies.
+	if c := p.userConfig(7); c.Target != "me" {
+		t.Fatalf("%+v", c)
+	}
+}
