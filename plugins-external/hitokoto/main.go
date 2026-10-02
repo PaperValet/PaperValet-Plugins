@@ -32,6 +32,17 @@ var Metadata = &plugin.PluginMetadata{
 
 type HitokotoPlugin struct {
 	http *http.Client
+	set  plugin.Settings
+}
+
+// sortedTypeKeys lists type letters a..l for the settings choices.
+func sortedTypeKeys() []string {
+	out := make([]string, 0, len(typeNames))
+	for k := range typeNames {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func New() *HitokotoPlugin {
@@ -43,6 +54,27 @@ func (p *HitokotoPlugin) Description() string { return Metadata.Description }
 func (p *HitokotoPlugin) DescEN() string      { return Metadata.DescEN }
 
 func (p *HitokotoPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
+	choices := make([]plugin.Choice, 0, len(typeNames)+1)
+	choices = append(choices, plugin.Choice{Value: "", Label: "不筛选", LabelEN: "No filter"})
+	for _, k := range sortedTypeKeys() {
+		n := typeNames[k]
+		choices = append(choices, plugin.Choice{Value: k, Label: fmt.Sprintf("%s · %s", strings.ToUpper(k), n[0]), LabelEN: fmt.Sprintf("%s · %s", strings.ToUpper(k), n[1])})
+	}
+	set, err := mgr.Host().Settings(&plugin.SettingsSpec{
+		Plugin:  p.Name(),
+		Title:   "💬 一言",
+		TitleEN: "💬 Hitokoto",
+		Settings: []plugin.Setting{{
+			Key: "type", Label: "默认类型", LabelEN: "Default type",
+			Hint:   "不带类型发 hitokoto 时用它，可一次挑多个类型",
+			HintEN: "Used when hitokoto is sent without types; several can be picked",
+			Kind:   plugin.SettingChoice, Default: "", Choices: choices,
+		}},
+	})
+	if err != nil {
+		return err
+	}
+	p.set = set
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "hitokoto",
 		Description: "获取随机一言，可按一个或多个类型筛选",
@@ -135,12 +167,13 @@ func (p *HitokotoPlugin) help(ctx *plugin.CommandContext) string {
 			plugin.Code("hitokoto")+" 随机一言\n"+
 			plugin.Code("hitokoto a")+" 只获取动画类\n"+
 			plugin.Code("hitokoto a c h")+" 从多个类型中随机（也可写 "+plugin.Code("ach")+"）\n"+
-			plugin.Code("hitokoto hh")+" 只获取影视类（单独的 h 为帮助）\n\n"+
+			plugin.Code("hitokoto hh")+" 只获取影视类（单独的 h 为帮助）\n"+
+			plugin.Code("hitokoto")+" 默认类型在机器人面板设置\n\n"+
 			"**类型**\n"+p.typeList(ctx)+"\n\n"+
 			"💡 数据来源：hitokoto.cn",
 		"💬 **Hitokoto**\n\n"+
 			"**Usage**\n"+
-			plugin.Code("hitokoto")+" random quote\n"+
+			plugin.Code("hitokoto")+" the default type(s) set in the bot panel\n"+
 			plugin.Code("hitokoto a")+" anime quotes only\n"+
 			plugin.Code("hitokoto a c h")+" random among several types (or "+plugin.Code("ach")+")\n"+
 			plugin.Code("hitokoto hh")+" film & TV only (a lone h shows help)\n\n"+
