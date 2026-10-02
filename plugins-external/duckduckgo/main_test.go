@@ -22,7 +22,7 @@ func TestParseLimitAndQuery(t *testing.T) {
 		{[]string{"golang", "-n", "abc"}, "golang -n abc", 8},
 	}
 	for _, c := range cases {
-		q, l := parseLimitAndQuery(c.in)
+		q, l := parseLimitAndQuery(c.in, defaultLimit)
 		if q != c.q || l != c.limit {
 			t.Errorf("%v: got %q %d", c.in, q, l)
 		}
@@ -142,5 +142,17 @@ func TestPackPages(t *testing.T) {
 	empty := packPages(ctx, "q", bundle{notes: []string{"html: blocked"}}, time.Second)
 	if len(empty) != 1 || !strings.Contains(empty[0], "blocked") {
 		t.Fatal(empty)
+	}
+}
+
+func TestParseLimitUsesPanelDefault(t *testing.T) {
+	if _, l := parseLimitAndQuery([]string{"go"}, 3); l != 3 {
+		t.Fatalf("default ignored: %d", l)
+	}
+	if _, l := parseLimitAndQuery([]string{"go", "-n", "5"}, 3); l != 5 {
+		t.Fatalf("-n ignored: %d", l)
+	}
+	if _, l := parseLimitAndQuery([]string{"go"}, 99); l != maxLimit {
+		t.Fatalf("default not clamped: %d", l)
 	}
 }
