@@ -53,3 +53,21 @@ func TestHelpers(t *testing.T) {
 		t.Fatalf("%q", parts)
 	}
 }
+
+func TestTargetHelpers(t *testing.T) {
+	if !sameLang("zh-TW", "zh-CN") || !sameLang("zh", "zh-CN") || sameLang("", "en") || sameLang("ja", "en") {
+		t.Fatal("sameLang")
+	}
+	if flipTarget("zh-CN") != "en" || flipTarget("en") != "zh-CN" || flipTarget("ja") != "en" {
+		t.Fatal("flipTarget")
+	}
+	for _, c := range targetChoices {
+		if _, ok := langNames[c]; !ok {
+			t.Fatalf("choice %s has no name", c)
+		}
+	}
+	p := New()
+	if def, flip := p.defaults(); def != "zh-CN" || !flip {
+		t.Fatal("defaults without settings")
+	}
+}
