@@ -1,6 +1,8 @@
 package main
 
 import (
+	"github.com/TiaraBasori/PaperValet/pkg/plugin"
+
 	"encoding/json"
 	"errors"
 	"os"
@@ -110,3 +112,13 @@ func normalizeTarget(t string) (string, error) {
 }
 
 func isLocal(t string) bool { return strings.EqualFold(strings.TrimSpace(t), "local") }
+
+// validPanelTarget checks a target typed in the bot panel. Telegram
+// resolution happens on use; here only the shape is validated.
+func validPanelTarget(t string) (string, error) {
+	norm, err := normalizeTarget(t)
+	if err != nil {
+		return "", plugin.Invalid("填 @用户名、数字 chatID、me 或 local", "use @username, a numeric chat id, me or local")
+	}
+	return norm, nil
+}
