@@ -219,3 +219,18 @@ func TestTimeLimitFinishes(t *testing.T) {
 		t.Fatal("task should be removed after limit")
 	}
 }
+
+func TestValidTimezone(t *testing.T) {
+	if got, err := validTimezone(" Asia/Shanghai "); err != nil || got != "Asia/Shanghai" {
+		t.Fatalf("%q %v", got, err)
+	}
+	if got, err := validTimezone(""); err != nil || got != "" {
+		t.Fatal("empty must clear")
+	}
+	if got, err := validTimezone("local"); err != nil || got != "" {
+		t.Fatal("local must clear")
+	}
+	if _, err := validTimezone("Mars/Olympus"); err == nil {
+		t.Fatal("bad zone accepted")
+	}
+}
