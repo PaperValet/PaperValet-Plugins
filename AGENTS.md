@@ -20,6 +20,7 @@ Never commit `go.work`, `go.sum` or `.so` files (all gitignored).
 
 - `var Metadata = &plugin.PluginMetadata{...}` with `Name` matching the directory and `Name()`, plus `Description`, `DescEN`, `Version`, `Author`. `scripts/gen-registry.py` turns it into `plugins.json`, which `apt` reads.
 - Every command sets `Description`, `DescEN`, `Usage`, `UsageEN`, and answers `<command> help`.
+- **Options are never commands.** No `<cmd> set/config/on|off` subcommands. Declare them in `Init` with `mgr.Host().Settings(&plugin.SettingsSpec{Plugin: name, ...})` and read them on demand (`Bool/String/Int`). Lists and anything richer go in `mgr.Host().Bot(name).SetPage(&plugin.Page{...})`. Validation errors use `plugin.Invalid(zh, en)`. See the [Plugin SDK](https://github.com/PaperValet/PaperValet/blob/master/docs/plugin-sdk.md).
 - No `Aliases` except one short form for a long command (`ddg`, `st`), and one spelling per subcommand (`list`, not `list`/`ls`). Users make shortcuts with `.alias`.
 - Persistent state in `data/<name>/` via `mgr.Host().DataDir`. Goroutines stop in `Stop`.
 - Only import `github.com/TiaraBasori/PaperValet/pkg/plugin`. If the SDK lacks something, add it to PaperValet first.
