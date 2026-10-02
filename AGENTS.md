@@ -2,7 +2,7 @@
 
 External plugins for [PaperValet](https://github.com/PaperValet/PaperValet). Each plugin is a Go plugin (`.so`) in its own directory under `plugins-external/<name>/` with its own `go.mod`.
 
-Read the main repo's [AGENTS.md](https://github.com/PaperValet/PaperValet/blob/master/AGENTS.md) for shared conventions (bilingual text, Markdown escaping, small commits, no compatibility shims).
+Read the main repo's [AGENTS.md](https://github.com/PaperValet/PaperValet/blob/master/AGENTS.md) for shared conventions (bilingual text, Markdown escaping, one logical change per commit, no compatibility shims).
 
 ## Build and test
 
