@@ -41,11 +41,11 @@ type SendAtPlugin struct {
 	tasks    []*Task
 	nextID   int
 	next     map[int]time.Time // in-memory next fire time per active task
-	cfg      config
 	loc      *time.Location
 	api      *tg.Client
 	resolver plugin.PeerResolver
 	logger   plugin.Logger
+	set      plugin.Settings
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -63,19 +63,49 @@ func (p *SendAtPlugin) DescEN() string      { return Metadata.DescEN }
 func (p *SendAtPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 	// Restored tasks must send before any command runs, so take the
 	// long-lived client from the host instead of a command context.
+	var host plugin.Host
 	if mgr != nil {
-		if h := mgr.Host(); h != nil {
+		host = mgr.Host()
+		if host != nil {
 			p.mu.Lock()
-			p.api, p.resolver, p.logger = h.API(), h.PeerResolver(), h.Logger(p.Name())
+			p.api, p.resolver, p.logger = host.API(), host.PeerResolver(), host.Logger(p.Name())
 			p.mu.Unlock()
+		}
+	}
+	if host != nil {
+		set, err := host.Settings(&plugin.SettingsSpec{
+			Plugin:  p.Name(),
+			Title:   "⏰ 定时发送",
+			TitleEN: "⏰ Scheduled messages",
+			Settings: []plugin.Setting{{
+				Key: "timezone", Label: "每日任务时区", LabelEN: "Daily-task timezone",
+				Hint:   "IANA 名称如 Asia/Shanghai，留空用系统时区",
+				HintEN: "An IANA name like Asia/Shanghai; empty keeps the system zone",
+				Kind:   plugin.SettingText, Validate: validTimezone,
+			}},
+			OnChange: func(key string) {
+				if key == "timezone" {
+					p.setZone(p.set.String("timezone"))
+				}
+			},
+		})
+		if err != nil {
+			return err
+		}
+		p.set = set
+		if err := host.Bot(p.Name()).SetPage(&plugin.Page{
+			Title: "任务列表", TitleEN: "Tasks",
+			Handle: p.page,
+		}); err != nil && err != plugin.ErrBotNotReady {
+			return err
 		}
 	}
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "sendat",
 		Description: "定时发送消息：间隔 / 每天定时 / 单次，任务持久化，支持列出、暂停、恢复、删除",
 		DescEN:      "Scheduled messages: interval / daily / one-shot, persistent, with list, pause, resume and delete",
-		Usage:       "sendat <时间> | <消息> · sendat list [all] · sendat pause|resume|rm <ID> · sendat tz [时区] · sendat help",
-		UsageEN:     "sendat <time> | <message> · sendat list [all] · sendat pause|resume|rm <ID> · sendat tz [zone] · sendat help",
+		Usage:       "sendat <时间> | <消息> · sendat list [all] · sendat pause|resume|rm <ID> · sendat help",
+		UsageEN:     "sendat <time> | <message> · sendat list [all] · sendat pause|resume|rm <ID> · sendat help",
 		Plugin:      p.Name(),
 		Category:    "tools",
 		OwnerOnly:   true,
@@ -94,6 +124,7 @@ func (p *SendAtPlugin) Start(ctx context.Context) error {
 		p.mu.Unlock()
 		return fmt.Errorf("sendat: load tasks: %w", err)
 	}
+	p.applyPanelZone()
 	now := time.Now()
 	p.next = map[int]time.Time{}
 	changed := false
@@ -120,6 +151,20 @@ func (p *SendAtPlugin) Start(ctx context.Context) error {
 
 	go p.loop(runCtx, done)
 	return nil
+}
+
+// applyPanelZone reads the panel timezone once at start.
+func (p *SendAtPlugin) applyPanelZone() {
+	if p.set == nil {
+		return
+	}
+	name := p.set.String("timezone")
+	if name == "" {
+		return
+	}
+	if l, err := time.LoadLocation(name); err == nil {
+		p.loc = l
+	}
 }
 
 // Stop halts the scheduler and waits for it to exit.
@@ -292,17 +337,7 @@ func (p *SendAtPlugin) loadLocked() error {
 	if err := readJSON(filepath.Join(p.dir, tasksFile), &sf); err != nil {
 		return err
 	}
-	var cfg config
-	if err := readJSON(filepath.Join(p.dir, configFile), &cfg); err != nil {
-		return err
-	}
-	p.cfg = cfg
 	p.loc = time.Local
-	if cfg.Timezone != "" {
-		if loc, err := time.LoadLocation(cfg.Timezone); err == nil {
-			p.loc = loc
-		}
-	}
 	p.tasks = p.tasks[:0]
 	maxID := 0
 	for _, t := range sf.Tasks {
@@ -392,8 +427,6 @@ func (p *SendAtPlugin) handle(ctx *plugin.CommandContext) error {
 		return p.cmdChange(ctx, rest, "pause")
 	case "resume":
 		return p.cmdChange(ctx, rest, "resume")
-	case "tz":
-		return p.cmdTZ(ctx, rest)
 	}
 	return p.cmdAdd(ctx)
 }
@@ -410,7 +443,7 @@ func helpText(ctx *plugin.CommandContext) string {
 	b.WriteString(line("sendat rm <ID>", "删除任务", "delete a task"))
 	b.WriteString(line("sendat pause <ID>", "暂停任务", "pause a task"))
 	b.WriteString(line("sendat resume <ID>", "恢复任务", "resume a task"))
-	b.WriteString(line(tl("sendat tz [时区]", "sendat tz [zone]"), "查看/设置每日任务时区，如 Asia/Shanghai", "show/set the zone for daily tasks, e.g. Asia/Shanghai"))
+	b.WriteString(tl("时区在机器人面板里设置\n", "The timezone is set in the bot panel\n"))
 	b.WriteString("\n**" + tl("示例", "Examples") + "**\n")
 	b.WriteString(line(tl("sendat 16:00:00 date | 投票截止！", "sendat 16:00:00 date | Voting closed!"), "下一次 16:00 发送一次", "send once at the next 16:00"))
 	b.WriteString(line(tl("sendat every 23:59:59 date | 又是无所事事的一天呢。", "sendat every 23:59:59 date | Another idle day."), "每天 23:59:59 发送", "send daily at 23:59:59"))
@@ -673,53 +706,105 @@ func (p *SendAtPlugin) cmdChange(ctx *plugin.CommandContext, args []string, op s
 	return ctx.Edit(b.String())
 }
 
-func (p *SendAtPlugin) cmdTZ(ctx *plugin.CommandContext, args []string) error {
-	tl := ctx.Tlocal
-	if len(args) == 0 {
-		p.mu.Lock()
-		loc := p.loc
-		p.mu.Unlock()
-		return ctx.Edit("🌐 **" + tl("时区", "Timezone") + "**\n\n" +
-			tl("当前", "Current") + "  " + plugin.Code(loc.String()) + "\n" +
-			tl("时间", "Now") + "  " + plugin.Code(time.Now().In(loc).Format("2006-01-02 15:04:05 MST")) + "\n\n" +
-			"💡 " + plugin.Code("sendat tz Asia/Shanghai") + tl("，", ", ") + plugin.Code("sendat tz local") + tl(" 恢复系统时区", " resets to system zone"))
+// validTimezone checks and normalizes a panel timezone.
+func validTimezone(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", nil
 	}
-	if !ctx.IsSelf() {
-		return ctx.Edit("❌ " + tl("只有主账号可以修改时区", "Only the owner can change the timezone"))
+	if strings.EqualFold(s, "local") {
+		return "", nil
 	}
-	name := args[0]
+	l, err := time.LoadLocation(s)
+	if err != nil {
+		return "", plugin.Invalid("不是有效的时区名，例如 Asia/Shanghai", "not a valid zone, e.g. Asia/Shanghai")
+	}
+	return l.String(), nil
+}
+
+// setZone applies a timezone and reschedules daily tasks.
+func (p *SendAtPlugin) setZone(name string) {
 	loc := time.Local
-	if !strings.EqualFold(name, "local") {
-		l, err := time.LoadLocation(name)
-		if err != nil {
-			return ctx.Edit("❌ " + tl("未知时区: ", "Unknown timezone: ") + plugin.Code(name))
+	if name != "" {
+		if l, err := time.LoadLocation(name); err == nil {
+			loc = l
 		}
-		loc = l
-		name = l.String()
-	} else {
-		name = ""
 	}
 	p.mu.Lock()
-	old := p.cfg
-	p.cfg.Timezone = name
-	err := writeJSON(filepath.Join(p.dir, configFile), p.cfg)
-	if err != nil {
-		p.cfg = old
-	} else {
-		p.loc = loc
-		now := time.Now()
-		for _, t := range p.tasks {
-			if !t.Pause && t.Mode == modeDaily {
-				p.next[t.ID] = nextRun(*t, now, loc)
-			}
+	p.loc = loc
+	now := time.Now()
+	for _, t := range p.tasks {
+		if !t.Pause && t.Mode == modeDaily {
+			p.next[t.ID] = nextRun(*t, now, loc)
 		}
 	}
 	p.mu.Unlock()
-	if err != nil {
-		return ctx.Edit("❌ " + tl("保存失败: ", "Save failed: ") + plugin.Escape(err.Error()))
-	}
 	p.poke()
-	return ctx.Edit("✅ " + tl("时区已设置为 ", "Timezone set to ") + plugin.Code(loc.String()))
+}
+
+// page renders the task list with pause/resume/rm buttons.
+func (p *SendAtPlugin) page(c *plugin.BotContext) (*plugin.View, error) {
+	tl := c.Tlocal
+	if op, id, ok := strings.Cut(c.Data, ":"); ok {
+		n, err := strconv.Atoi(id)
+		if err == nil {
+			p.mu.Lock()
+			idx := p.indexLocked(n)
+			switch {
+			case idx < 0:
+			case op == "rm":
+				p.tasks = append(p.tasks[:idx], p.tasks[idx+1:]...)
+				delete(p.next, n)
+			case op == "pause" && !p.tasks[idx].Pause:
+				p.tasks[idx].Pause = true
+				delete(p.next, n)
+			case op == "resume" && p.tasks[idx].Pause:
+				p.tasks[idx].Pause = false
+				p.next[n] = p.firstRun(*p.tasks[idx], time.Now())
+			}
+			_ = p.saveLocked()
+			p.mu.Unlock()
+			p.poke()
+		}
+	}
+	p.mu.Lock()
+	loc := p.loc
+	tasks := make([]Task, len(p.tasks))
+	for i, t := range p.tasks {
+		tasks[i] = *t
+	}
+	next := map[int]time.Time{}
+	for id, at := range p.next {
+		next[id] = at
+	}
+	p.mu.Unlock()
+
+	v := &plugin.View{Text: "⏰ **" + tl("任务", "Tasks") + "**  " + plugin.Code(len(tasks))}
+	if len(tasks) == 0 {
+		v.Text += "\n\n" + tl("还没有任务，在聊天里发 `sendat <时间> | <消息>` 添加", "No tasks yet; send `sendat <time> | <message>` in a chat")
+		return v, nil
+	}
+	sort.Slice(tasks, func(i, j int) bool { return tasks[i].ID < tasks[j].ID })
+	for _, t := range tasks {
+		title := fmt.Sprintf("#%d", t.ID)
+		if t.Pause {
+			title += tl(" ⏸", " ⏸")
+		}
+		v.Text += fmt.Sprintf("\n\n**%s**\n%s  %s\n", plugin.Escape(title), tl("计划", "Schedule"), plugin.Code(scheduleText(t, loc, tl)))
+		if at, ok := next[t.ID]; ok {
+			v.Text += tl("下次", "Next") + "  " + plugin.Code(at.In(loc).Format("01-02 15:04")) + "\n"
+		}
+		v.Text += tl("消息", "Message") + "  " + plugin.Code(truncate(t.Msg, 40))
+		var row []plugin.Button
+		if t.Pause {
+			row = append(row, plugin.Btn("▶️ #"+fmt.Sprint(t.ID), fmt.Sprintf("resume:%d", t.ID)))
+		} else {
+			row = append(row, plugin.Btn("⏸️ #"+fmt.Sprint(t.ID), fmt.Sprintf("pause:%d", t.ID)))
+		}
+		row = append(row, plugin.Btn("🗑 #"+fmt.Sprint(t.ID), fmt.Sprintf("rm:%d", t.ID)))
+		v.Buttons = append(v.Buttons, row)
+	}
+	return v, nil
 }
 
 // ---------------------------------------------------------------- helpers
