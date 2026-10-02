@@ -25,6 +25,15 @@ const (
 	pageSize      = 100
 )
 
+// validMessage trims the panel value; empty keeps the built-in message.
+func validMessage(s string) (string, error) {
+	s = strings.TrimSpace(strings.Join(strings.Fields(s), " "))
+	if utf8.RuneCountInString(s) > 200 {
+		return "", plugin.Invalid("最多 200 字", "200 characters at most")
+	}
+	return s, nil
+}
+
 var Metadata = &plugin.PluginMetadata{
 	Name:        "atadmins",
 	Description: "一键艾特全部管理员",
@@ -38,6 +47,7 @@ type AtAdminsPlugin struct {
 	mu     sync.Mutex
 	ctx    context.Context
 	cancel context.CancelFunc
+	set    plugin.Settings
 	wg     sync.WaitGroup
 }
 
@@ -48,6 +58,21 @@ func (p *AtAdminsPlugin) Description() string { return Metadata.Description }
 func (p *AtAdminsPlugin) DescEN() string      { return Metadata.DescEN }
 
 func (p *AtAdminsPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
+	set, err := mgr.Host().Settings(&plugin.SettingsSpec{
+		Plugin:  p.Name(),
+		Title:   "👮 召唤管理员",
+		TitleEN: "👮 At Admins",
+		Settings: []plugin.Setting{{
+			Key: "message", Label: "默认召唤消息", LabelEN: "Default message",
+			Hint:   "不带消息发 atadmins 时用它，留空用内置消息",
+			HintEN: "Used when atadmins is sent without a message; empty keeps the built-in one",
+			Kind:   plugin.SettingText, Validate: validMessage,
+		}},
+	})
+	if err != nil {
+		return err
+	}
+	p.set = set
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "atadmins",
 		Description: "一键艾特群组内全部管理员，可附带消息，回复消息时召唤到该消息",
@@ -161,6 +186,9 @@ func (p *AtAdminsPlugin) handleAtAdmins(ctx *plugin.CommandContext) error {
 	say := strings.TrimSpace(ctx.RawArgs)
 	if say == "" {
 		say = strings.TrimSpace(strings.Join(ctx.Args, " "))
+	}
+	if say == "" && p.set != nil {
+		say = p.set.String("message")
 	}
 	if say == "" {
 		say = ctx.Tlocal("召唤本群所有管理员", "Calling all admins of this group")
