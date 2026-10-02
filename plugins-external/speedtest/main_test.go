@@ -151,3 +151,17 @@ func TestFillCorners(t *testing.T) {
 		t.Error("centre lost")
 	}
 }
+
+func TestValidServerID(t *testing.T) {
+	if got, err := validServerID(" 12345 "); err != nil || got != "12345" {
+		t.Fatalf("%q %v", got, err)
+	}
+	if got, err := validServerID(""); err != nil || got != "" {
+		t.Fatal("empty must clear")
+	}
+	for _, bad := range []string{"abc", "0", "-3"} {
+		if _, err := validServerID(bad); err == nil {
+			t.Fatalf("%q accepted", bad)
+		}
+	}
+}
