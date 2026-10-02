@@ -40,10 +40,11 @@ var Metadata = &plugin.PluginMetadata{
 }
 
 type SpeedtestPlugin struct {
-	mu      sync.Mutex // guards cfg file
+	mu      sync.Mutex // guards settings access
 	running sync.Mutex // one speed test at a time
 	ctx     context.Context
 	cancel  context.CancelFunc
+	set     plugin.Settings
 }
 
 func New() *SpeedtestPlugin {
@@ -56,13 +57,48 @@ func (p *SpeedtestPlugin) Description() string { return "网络速度测试（Sp
 func (p *SpeedtestPlugin) DescEN() string      { return "Network speed test (Speedtest by Ookla)" }
 
 func (p *SpeedtestPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
+	set, err := mgr.Host().Settings(&plugin.SettingsSpec{
+		Plugin:  p.Name(),
+		Title:   "⚡️ 网速测试",
+		TitleEN: "⚡️ Speedtest",
+		Settings: []plugin.Setting{
+			{
+				Key: "server", Label: "默认服务器 ID", LabelEN: "Default server ID",
+				Hint:   "留空自动选择；附近列表在机器人面板的页面里",
+				HintEN: "Empty picks automatically; nearby servers are in the bot panel page",
+				Kind:   plugin.SettingText, Validate: validServerID,
+			},
+			{
+				Key: "type", Label: "结果消息类型", LabelEN: "Result message type",
+				Hint:   "发送失败时按顺序回退到其他类型",
+				HintEN: "On failure it falls back to the other types in order",
+				Kind:   plugin.SettingChoice, Default: "photo",
+				Choices: []plugin.Choice{
+					{Value: "photo", Label: "图片", LabelEN: "Photo"},
+					{Value: "sticker", Label: "贴纸", LabelEN: "Sticker"},
+					{Value: "file", Label: "文件", LabelEN: "File"},
+					{Value: "txt", Label: "文本", LabelEN: "Text"},
+				},
+			},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	p.set = set
+	if err := mgr.Host().Bot(p.Name()).SetPage(&plugin.Page{
+		Title: "附近服务器", TitleEN: "Nearby servers",
+		Handle: p.serverPage,
+	}); err != nil && err != plugin.ErrBotNotReady {
+		return err
+	}
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "speedtest",
 		Aliases:     []string{"st"},
 		Description: "网络速度测试（Ookla CLI，自动下载）",
 		DescEN:      "Network speed test (Ookla CLI, auto-downloaded)",
-		Usage:       "speedtest [服务器ID|list|best|test <ID>|set <ID>|clear|type <photo|sticker|file|txt>|config|check|diagnose|fix|update|help] [--system|-s]",
-		UsageEN:     "speedtest [serverID|list|best|test <ID>|set <ID>|clear|type <photo|sticker|file|txt>|config|check|diagnose|fix|update|help] [--system|-s]",
+		Usage:       "speedtest [服务器ID|list|best|test <ID>|check|diagnose|fix|update|help] [--system|-s]",
+		UsageEN:     "speedtest [serverID|list|best|test <ID>|check|diagnose|fix|update|help] [--system|-s]",
 		Plugin:      p.Name(),
 		Category:    "tools",
 		Handler:     p.handle,
@@ -102,40 +138,26 @@ type msgType string
 
 var defaultOrder = []msgType{"photo", "sticker", "file", "txt"}
 
-type config struct {
-	DefaultServerID *int    `json:"default_server_id,omitempty"`
-	PreferredType   msgType `json:"preferred_type,omitempty"`
+// preferredType reads the panel's result type; empty means the default
+// order.
+func (p *SpeedtestPlugin) preferredType() msgType {
+	if p.set == nil {
+		return ""
+	}
+	return msgType(p.set.String("type"))
 }
 
-func configPath() string { return filepath.Join(dataDir, "config.json") }
-
-func (p *SpeedtestPlugin) loadConfig() config {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	var c config
-	if b, err := os.ReadFile(configPath()); err == nil {
-		_ = json.Unmarshal(b, &c)
+// validServerID accepts an empty value or a positive integer.
+func validServerID(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", nil
 	}
-	return c
-}
-
-func (p *SpeedtestPlugin) updateConfig(fn func(*config)) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	var c config
-	if b, err := os.ReadFile(configPath()); err == nil {
-		_ = json.Unmarshal(b, &c)
+	n, err := strconv.Atoi(s)
+	if err != nil || n <= 0 {
+		return "", plugin.Invalid("填正整数服务器 ID 或留空", "a positive server ID or empty")
 	}
-	fn(&c)
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return err
-	}
-	b, _ := json.MarshalIndent(c, "", "  ")
-	tmp := configPath() + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, configPath())
+	return s, nil
 }
 
 func messageOrder(pref msgType) []msgType {
@@ -172,14 +194,12 @@ func helpText(ctx *plugin.CommandContext) string {
 			"• `speedtest list` — 显示附近服务器列表\n"+
 			"• `speedtest best` — 查找推荐服务器（按延迟）\n"+
 			"• `speedtest test [ID]` — 测试指定服务器可用性\n"+
-			"• `speedtest set [ID]` — 设置默认服务器\n"+
-			"• `speedtest clear` — 清除默认服务器\n"+
-			"• `speedtest type photo/sticker/file/txt` — 设置优先消息类型\n"+
-			"• `speedtest config` — 显示配置\n"+
 			"• `speedtest check` — 检查网络连接\n"+
 			"• `speedtest diagnose` — 诊断 CLI 可执行文件\n"+
 			"• `speedtest fix` — 自动修复 CLI 安装\n"+
 			"• `speedtest update` — 重新下载 Speedtest CLI\n\n"+
+			"**设置（机器人面板）**\n"+
+			"默认服务器、结果消息类型在机器人的 /menu 里调整\n\n"+
 			"**系统 speedtest**\n"+
 			"添加 `--system` 或 `-s` 使用系统已安装的 speedtest（失败回退内置 CLI），例: `speedtest -s 12345`\n\n"+
 			"💡 CLI 自动下载到 data/speedtest/",
@@ -190,14 +210,12 @@ func helpText(ctx *plugin.CommandContext) string {
 			"• `speedtest list` — nearby servers\n"+
 			"• `speedtest best` — recommended servers (by latency)\n"+
 			"• `speedtest test [ID]` — check a server\n"+
-			"• `speedtest set [ID]` — set default server\n"+
-			"• `speedtest clear` — clear default server\n"+
-			"• `speedtest type photo/sticker/file/txt` — preferred result type\n"+
-			"• `speedtest config` — show config\n"+
 			"• `speedtest check` — check connectivity\n"+
 			"• `speedtest diagnose` — diagnose the CLI binary\n"+
 			"• `speedtest fix` — repair the CLI install\n"+
 			"• `speedtest update` — re-download Speedtest CLI\n\n"+
+			"**Settings (bot panel)**\n"+
+			"Default server and result message type live in the bot's /menu\n\n"+
 			"**System speedtest**\n"+
 			"Add `--system` or `-s` to use an installed speedtest (falls back to the bundled CLI), e.g. `speedtest -s 12345`\n\n"+
 			"💡 The CLI is downloaded into data/speedtest/")
@@ -232,17 +250,6 @@ func (p *SpeedtestPlugin) handle(ctx *plugin.CommandContext) error {
 		return ctx.Edit(helpText(ctx))
 	case "list":
 		return p.cmdList(c, ctx)
-	case "set":
-		return p.cmdSet(ctx, arg1)
-	case "clear":
-		if err := p.updateConfig(func(cf *config) { cf.DefaultServerID = nil }); err != nil {
-			return ctx.Edit("❌ " + plugin.Escape(err.Error()))
-		}
-		return ctx.Edit(header + "✅ " + ctx.Tlocal("默认服务器已清除", "Default server cleared"))
-	case "config":
-		return p.cmdConfig(c, ctx)
-	case "type":
-		return p.cmdType(ctx, arg1)
 	case "check":
 		_ = ctx.Edit(ctx.Tlocal("🔍 正在检查网络连接...", "🔍 Checking connectivity..."))
 		ok, msg := checkNetwork(c, ctx)
@@ -312,70 +319,56 @@ func (p *SpeedtestPlugin) cmdList(c context.Context, ctx *plugin.CommandContext)
 		lines[i] = serverLine(s)
 	}
 	return ctx.Edit(header + strings.Join(lines, "\n") + "\n\n💡 " +
-		ctx.Tlocal("使用 `speedtest set [ID]` 设为默认服务器", "Use `speedtest set [ID]` to make one the default"))
+		ctx.Tlocal("默认服务器在机器人面板里设置", "The default server is set in the bot panel"))
 }
 
-func (p *SpeedtestPlugin) cmdSet(ctx *plugin.CommandContext, arg string) error {
-	id, err := strconv.Atoi(arg)
-	if err != nil || id <= 0 {
-		return ctx.Edit("❌ " + ctx.Tlocal("请指定有效的服务器ID，例: ", "Give a valid server ID, e.g. ") + plugin.Code("speedtest set 12345"))
-	}
-	if err := p.updateConfig(func(cf *config) { cf.DefaultServerID = &id }); err != nil {
-		return ctx.Edit("❌ " + plugin.Escape(err.Error()))
-	}
-	return ctx.Edit(header + "✅ " + ctx.Tlocal("默认服务器已设置为 ", "Default server set to ") + plugin.Code(fmt.Sprint(id)))
-}
-
-func (p *SpeedtestPlugin) cmdType(ctx *plugin.CommandContext, arg string) error {
-	t := msgType(strings.ToLower(arg))
-	if t == "text" {
-		t = "txt"
-	}
-	valid := false
-	for _, v := range defaultOrder {
-		if v == t {
-			valid = true
+// serverPage lists nearby servers with set/clear buttons; picking one
+// stores it as the default server setting.
+func (p *SpeedtestPlugin) serverPage(c *plugin.BotContext) (*plugin.View, error) {
+	tl := c.Tlocal
+	if pick, ok := strings.CutPrefix(c.Data, "set:"); ok {
+		if err := p.set.Set("server", pick); err != nil {
+			return nil, err
 		}
+		c.Toast(tl("已设为默认", "Set as default"))
 	}
-	if !valid {
-		return ctx.Edit("❌ " + ctx.Tlocal("参数错误，用法: ", "Invalid type, usage: ") + plugin.Code("speedtest type photo/sticker/file/txt"))
-	}
-	if err := p.updateConfig(func(cf *config) { cf.PreferredType = t }); err != nil {
-		return ctx.Edit("❌ " + plugin.Escape(err.Error()))
-	}
-	return ctx.Edit(header +
-		ctx.Tlocal("优先类型  ", "Preferred type  ") + plugin.Code(string(t)) + "\n" +
-		ctx.Tlocal("当前顺序  ", "Order  ") + plugin.Code(orderString(messageOrder(t))))
-}
-
-func (p *SpeedtestPlugin) cmdConfig(c context.Context, ctx *plugin.CommandContext) error {
-	cf := p.loadConfig()
-	def := "Auto"
-	if cf.DefaultServerID != nil {
-		def = fmt.Sprint(*cf.DefaultServerID)
-	}
-	typ := ctx.Tlocal("默认", "default") + " (" + orderString(defaultOrder) + ")"
-	if cf.PreferredType != "" {
-		typ = string(cf.PreferredType)
-	}
-	ver := cliVersion + ctx.Tlocal("（未安装）", " (not installed)")
-	if _, err := os.Stat(cliPath()); err == nil {
-		if d := diagnose(c); d.version != "" {
-			ver = d.version
+	if c.Data == "clear" {
+		if err := p.set.Set("server", ""); err != nil {
+			return nil, err
 		}
+		c.Toast(tl("已清除", "Cleared"))
 	}
-	sys := ctx.Tlocal("无", "none")
-	if bin, fl, err := findSystemCLI(c); err == nil {
-		sys = bin
-		if fl == flavourPython {
-			sys += " (python speedtest-cli)"
+	cur := ""
+	if p.set != nil {
+		cur = p.set.String("server")
+	}
+	cc, cancel := context.WithTimeout(c.Context(), 45*time.Second)
+	defer cancel()
+	servers, err := listServers(cc)
+	if err != nil {
+		return &plugin.View{Text: "❌ " + tl("获取服务器列表失败: ", "Failed to list servers: ") + plugin.Escape(err.Error())}, nil
+	}
+	if len(servers) > 10 {
+		servers = servers[:10]
+	}
+	v := &plugin.View{Text: "📡 **" + tl("附近服务器", "Nearby servers") + "**\n"}
+	if cur != "" {
+		v.Text += "\n" + tl("当前默认", "Current default") + "  " + plugin.Code(cur)
+	}
+	for _, sv := range servers {
+		v.Text += "\n\n" + serverLine(sv)
+		mark := "📡 设为默认"
+		if fmt.Sprint(sv.ID) == cur {
+			mark = "✅ " + tl("默认", "default")
 		}
+		data := fmt.Sprintf("set:%d", sv.ID)
+		if fmt.Sprint(sv.ID) == cur {
+			data = "clear"
+			mark = "❌ " + tl("清除默认", "Clear default")
+		}
+		v.Buttons = append(v.Buttons, plugin.Row(plugin.Btn(mark, data)))
 	}
-	return ctx.Edit(header + "**" + ctx.Tlocal("配置", "Config") + "**\n" +
-		ctx.Tlocal("默认服务器  ", "Default server  ") + plugin.Code(def) + "\n" +
-		ctx.Tlocal("优先类型  ", "Preferred type  ") + plugin.Code(typ) + "\n" +
-		"Speedtest® CLI  " + plugin.Code(ver) + "\n" +
-		ctx.Tlocal("系统 speedtest  ", "System speedtest  ") + plugin.Code(sys))
+	return v, nil
 }
 
 // tcpLatency measures a TCP connect to a speedtest server.
@@ -483,7 +476,7 @@ func (p *SpeedtestPlugin) cmdBest(c context.Context, ctx *plugin.CommandContext)
 	}
 	return ctx.Edit(header + "🎯 **" + ctx.Tlocal("推荐服务器（按延迟）", "Recommended servers (by latency)") + "**\n" +
 		strings.Join(lines, "\n") + "\n\n💡 " +
-		ctx.Tlocal("`speedtest set [ID]` 设为默认，`speedtest [ID]` 直接测试", "`speedtest set [ID]` to make default, `speedtest [ID]` to test"))
+		ctx.Tlocal("机器人面板里可设为默认，`speedtest [ID]` 直接测试", "The bot panel sets the default; `speedtest [ID]` tests one"))
 }
 
 func (p *SpeedtestPlugin) cmdDiagnose(c context.Context, ctx *plugin.CommandContext) error {
@@ -553,9 +546,10 @@ func (p *SpeedtestPlugin) cmdRun(c context.Context, ctx *plugin.CommandContext, 
 			ctx.Tlocal("检查网络 / DNS / 防火墙，或使用 `speedtest check` 重新检查", "Check network / DNS / firewall, or run `speedtest check`"))
 	}
 
-	cf := p.loadConfig()
-	if serverID == 0 && cf.DefaultServerID != nil {
-		serverID = *cf.DefaultServerID
+	if serverID == 0 && p.set != nil {
+		if id, err := strconv.Atoi(p.set.String("server")); err == nil && id > 0 {
+			serverID = id
+		}
 	}
 	if _, err := os.Stat(cliPath()); err != nil && !useSystem {
 		_ = ctx.Edit(ctx.Tlocal("📥 正在下载 Speedtest CLI...", "📥 Downloading Speedtest CLI..."))
@@ -588,7 +582,7 @@ func (p *SpeedtestPlugin) cmdRun(c context.Context, ctx *plugin.CommandContext, 
 	}
 	text := formatResult(ctx.Lang, res, ex)
 
-	for _, t := range messageOrder(cf.PreferredType) {
+	for _, t := range messageOrder(p.preferredType()) {
 		if p.trySend(c, ctx, t, res, text) {
 			return nil
 		}
