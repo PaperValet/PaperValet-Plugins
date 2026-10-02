@@ -36,7 +36,11 @@ var Metadata = &plugin.PluginMetadata{
 
 type GtPlugin struct {
 	http *http.Client
+	set  plugin.Settings
 }
+
+// targetChoices are the default targets offered in the bot panel.
+var targetChoices = []string{"zh-CN", "zh-TW", "en", "ja", "ko", "fr", "de", "es", "ru"}
 
 func New() *GtPlugin {
 	return &GtPlugin{http: &http.Client{Timeout: 10 * time.Second}}
@@ -47,10 +51,38 @@ func (p *GtPlugin) Description() string { return Metadata.Description }
 func (p *GtPlugin) DescEN() string      { return Metadata.DescEN }
 
 func (p *GtPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
+	choices := make([]plugin.Choice, len(targetChoices))
+	for i, c := range targetChoices {
+		n := langNames[c]
+		choices[i] = plugin.Choice{Value: c, Label: n[0], LabelEN: n[1]}
+	}
+	set, err := mgr.Host().Settings(&plugin.SettingsSpec{
+		Plugin:  p.Name(),
+		Title:   "🌐 谷歌翻译",
+		TitleEN: "🌐 Google Translate",
+		Settings: []plugin.Setting{
+			{
+				Key: "target", Label: "默认目标语言", LabelEN: "Default target",
+				Hint:   "不指定语言时译成它",
+				HintEN: "Used when no language is given",
+				Kind:   plugin.SettingChoice, Default: "zh-CN", Choices: choices,
+			},
+			{
+				Key: "flip", Label: "原文已是目标语言时改译", LabelEN: "Flip when already in target",
+				Hint:   "比如默认中文而原文就是中文，就译成英文（默认英文时译成中文）",
+				HintEN: "e.g. default Chinese and the text is Chinese: translate to English (or to Chinese when the default is English)",
+				Kind:   plugin.SettingToggle, Default: true,
+			},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	p.set = set
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "gt",
-		Description: "谷歌翻译（默认译为中文，可指定目标语言，支持回复消息翻译）",
-		DescEN:      "Google Translate (Chinese by default, optional target language, works on replies)",
+		Description: "谷歌翻译（默认目标语言在机器人面板设置，可临时指定，支持回复消息翻译）",
+		DescEN:      "Google Translate (default target set in the bot panel, can be overridden, works on replies)",
 		Usage:       "gt [目标语言] <文本> | 回复消息 gt [目标语言] | gt help",
 		UsageEN:     "gt [target] <text> | reply with gt [target] | gt help",
 		Plugin:      p.Name(),
@@ -107,6 +139,38 @@ var ambiguous = map[string]bool{
 }
 
 // normalizeLang returns the Google code for s, or "" when unknown.
+// defaults returns the panel's default target and flip switch.
+func (p *GtPlugin) defaults() (string, bool) {
+	if p.set == nil {
+		return "zh-CN", true
+	}
+	t := p.set.String("target")
+	if _, ok := langNames[t]; !ok {
+		t = "zh-CN"
+	}
+	return t, p.set.Bool("flip")
+}
+
+// sameLang compares base languages: zh-CN and zh-TW are both zh.
+func sameLang(a, b string) bool {
+	base := func(s string) string {
+		s = strings.ToLower(s)
+		if i := strings.IndexAny(s, "-_"); i > 0 {
+			s = s[:i]
+		}
+		return s
+	}
+	return a != "" && base(a) == base(b)
+}
+
+// flipTarget is where text already in target goes instead.
+func flipTarget(target string) string {
+	if sameLang(target, "en") {
+		return "zh-CN"
+	}
+	return "en"
+}
+
 func normalizeLang(s string) string {
 	l := strings.TrimSpace(s)
 	if v, ok := aliases[strings.ToLower(l)]; ok {
@@ -163,7 +227,7 @@ func (p *GtPlugin) help(ctx *plugin.CommandContext) string {
 	return ctx.Tlocal(
 		"🌐 **谷歌翻译**\n\n"+
 			"**基本用法**\n"+
-			plugin.Code("gt <文本>")+" 翻译为中文（默认；原文是中文时译为英文）\n"+
+			plugin.Code("gt <文本>")+" 翻译为默认语言（在机器人面板设置，初始为中文）\n"+
 			plugin.Code("gt en <文本>")+" 翻译为英文\n"+
 			plugin.Code("gt ja <文本>")+" 翻译为指定语言\n\n"+
 			"**回复消息翻译**\n"+
@@ -174,7 +238,7 @@ func (p *GtPlugin) help(ctx *plugin.CommandContext) string {
 			"💡 文本最长 5000 字符",
 		"🌐 **Google Translate**\n\n"+
 			"**Basic**\n"+
-			plugin.Code("gt <text>")+" translate to Chinese (default; Chinese input goes to English)\n"+
+			plugin.Code("gt <text>")+" translate to the default language (set in the bot panel, Chinese at first)\n"+
 			plugin.Code("gt en <text>")+" translate to English\n"+
 			plugin.Code("gt ja <text>")+" translate to any language\n\n"+
 			"**Reply mode**\n"+
@@ -219,20 +283,21 @@ func (p *GtPlugin) handleTranslate(ctx *plugin.CommandContext) error {
 			fmt.Sprintf("文本过长（%d 字符），请保持在 %d 字符以内", n, maxInputChars),
 			fmt.Sprintf("Text too long (%d chars), keep it under %d", n, maxInputChars)))
 	}
+	def, flip := p.defaults()
 	if target == "" {
-		target = "zh-CN"
-		if mostlyChinese(text) {
-			target = "en"
+		target = def
+		if flip && sameLang(target, "zh") && mostlyChinese(text) {
+			target = flipTarget(target)
 		}
 	}
 
 	_ = ctx.Edit("🔄 " + ctx.Tlocal("翻译中…", "Translating…"))
 
 	res, err := p.translate(ctx.Context(), text, target)
-	// Default target was Chinese but the source turned out Chinese already:
-	// flip to English so the user gets something useful.
-	if err == nil && !explicit && target == "zh-CN" && strings.HasPrefix(strings.ToLower(res.detected), "zh") {
-		target = "en"
+	// The source turned out to be in the default target already: flip so
+	// the user gets something useful.
+	if err == nil && !explicit && flip && target == def && sameLang(res.detected, target) {
+		target = flipTarget(target)
 		res, err = p.translate(ctx.Context(), text, target)
 	}
 	if err != nil {
