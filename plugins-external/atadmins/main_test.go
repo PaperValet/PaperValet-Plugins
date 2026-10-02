@@ -49,3 +49,15 @@ func TestChunkMentionsEmpty(t *testing.T) {
 		t.Fatalf("expected none, got %v", c)
 	}
 }
+
+func TestValidMessage(t *testing.T) {
+	if got, err := validMessage("  请 查看 置顶 "); err != nil || got != "请 查看 置顶" {
+		t.Fatalf("%q %v", got, err)
+	}
+	if got, err := validMessage(""); err != nil || got != "" {
+		t.Fatal("empty must clear")
+	}
+	if _, err := validMessage(strings.Repeat("字", 201)); err == nil {
+		t.Fatal("too long accepted")
+	}
+}
