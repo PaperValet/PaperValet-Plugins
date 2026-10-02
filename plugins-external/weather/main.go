@@ -36,6 +36,16 @@ var Metadata = &plugin.PluginMetadata{
 
 type WeatherPlugin struct {
 	http *http.Client
+	set  plugin.Settings
+}
+
+// validCity trims the default city; empty clears it.
+func validCity(s string) (string, error) {
+	s = strings.Join(strings.Fields(s), " ")
+	if len([]rune(s)) > 64 {
+		return "", plugin.Invalid("城市名太长", "city name too long")
+	}
+	return s, nil
 }
 
 func New() *WeatherPlugin {
@@ -47,12 +57,27 @@ func (p *WeatherPlugin) Description() string { return Metadata.Description }
 func (p *WeatherPlugin) DescEN() string      { return Metadata.DescEN }
 
 func (p *WeatherPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
+	set, err := mgr.Host().Settings(&plugin.SettingsSpec{
+		Plugin:  p.Name(),
+		Title:   "🌤️ 天气",
+		TitleEN: "🌤️ Weather",
+		Settings: []plugin.Setting{{
+			Key: "city", Label: "默认城市", LabelEN: "Default city",
+			Hint:   "不带城市名发 weather 时查这里，例如 北京 或 London",
+			HintEN: "Used when weather is sent without a city, e.g. London",
+			Kind:   plugin.SettingText, Validate: validCity,
+		}},
+	})
+	if err != nil {
+		return err
+	}
+	p.set = set
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "weather",
 		Description: "查询全球城市实时天气（Open-Meteo，中文城市名自动识别）",
 		DescEN:      "Real-time weather for any city (Open-Meteo, Chinese names supported)",
-		Usage:       "weather <城市名> | weather help",
-		UsageEN:     "weather <city> | weather help",
+		Usage:       "weather [城市名] | weather help",
+		UsageEN:     "weather [city] | weather help",
 		Plugin:      p.Name(),
 		Category:    "tools",
 		Handler:     p.handleWeather,
@@ -170,7 +195,8 @@ func (p *WeatherPlugin) help(ctx *plugin.CommandContext) string {
 	return ctx.Tlocal(
 		"🌤️ **天气查询**\n\n"+
 			"**用法**\n"+
-			plugin.Code("weather <城市名>")+" 查询指定城市实时天气\n\n"+
+			plugin.Code("weather <城市名>")+" 查询指定城市实时天气\n"+
+			plugin.Code("weather")+" 查询默认城市（在机器人面板设置）\n\n"+
 			"**示例**\n"+
 			plugin.Code("weather 北京")+"\n"+
 			plugin.Code("weather beijing")+"\n"+
@@ -181,7 +207,8 @@ func (p *WeatherPlugin) help(ctx *plugin.CommandContext) string {
 			"💡 数据来源：Open-Meteo（免费、无需密钥），失败时回退 wttr.in",
 		"🌤️ **Weather**\n\n"+
 			"**Usage**\n"+
-			plugin.Code("weather <city>")+" current weather for a city\n\n"+
+			plugin.Code("weather <city>")+" current weather for a city\n"+
+			plugin.Code("weather")+" the default city (set in the bot panel)\n\n"+
 			"**Examples**\n"+
 			plugin.Code("weather London")+"\n"+
 			plugin.Code("weather New York")+"\n"+
@@ -193,13 +220,18 @@ func (p *WeatherPlugin) help(ctx *plugin.CommandContext) string {
 }
 
 func (p *WeatherPlugin) handleWeather(ctx *plugin.CommandContext) error {
-	if len(ctx.Args) == 0 {
-		return ctx.Edit(p.help(ctx))
-	}
-	if a := strings.ToLower(ctx.Args[0]); len(ctx.Args) == 1 && (a == "help" || a == "h") {
-		return ctx.Edit(p.help(ctx))
+	if len(ctx.Args) > 0 {
+		if a := strings.ToLower(ctx.Args[0]); len(ctx.Args) == 1 && (a == "help" || a == "h") {
+			return ctx.Edit(p.help(ctx))
+		}
 	}
 	input := strings.TrimSpace(strings.Join(ctx.Args, " "))
+	if input == "" && p.set != nil {
+		input = p.set.String("city")
+	}
+	if input == "" {
+		return ctx.Edit(p.help(ctx))
+	}
 	_ = ctx.Edit("🔍 " + ctx.Tlocal("正在识别城市…", "Resolving city…") + " " + plugin.Code(input))
 
 	loc, err := p.resolve(ctx, input)
