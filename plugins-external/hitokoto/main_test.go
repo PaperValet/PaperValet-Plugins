@@ -38,3 +38,21 @@ func TestFormat(t *testing.T) {
 		t.Fatal(s)
 	}
 }
+
+func TestDefaultTypesFromPanel(t *testing.T) {
+	if ts, inv := parseTypes(strings.Fields("a c")); len(ts) != 2 || len(inv) != 0 {
+		t.Fatalf("%v %v", ts, inv)
+	}
+	if ts, _ := parseTypes(strings.Fields("")); len(ts) != 0 {
+		t.Fatal("empty panel value must mean no filter")
+	}
+	keys := sortedTypeKeys()
+	if len(keys) != len(typeNames) {
+		t.Fatal("sortedTypeKeys mismatch")
+	}
+	for i := 1; i < len(keys); i++ {
+		if keys[i-1] >= keys[i] {
+			t.Fatal("not sorted")
+		}
+	}
+}
