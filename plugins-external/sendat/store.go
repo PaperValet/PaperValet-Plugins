@@ -13,18 +13,13 @@ import (
 )
 
 const (
-	dataDir    = "data/sendat"
-	tasksFile  = "tasks.json"
-	configFile = "config.json"
+	dataDir   = "data/sendat"
+	tasksFile = "tasks.json"
 )
 
 type storeFile struct {
 	NextID int     `json:"next_id"`
 	Tasks  []*Task `json:"tasks"`
-}
-
-type config struct {
-	Timezone string `json:"timezone,omitempty"`
 }
 
 func readJSON(path string, v any) error {
