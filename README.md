@@ -28,6 +28,7 @@ External plugins for [PaperValet](https://github.com/PaperValet/PaperValet) · [
 | save | `save` | 保存和转发消息，绕过禁止转发 | Save messages, even from no-forward chats |
 | sendat | `sendat` | 定时发送消息，重启不丢 | Scheduled messages that survive restarts |
 | speedtest | `speedtest` · `st` | Ookla 网速测试 | Speedtest by Ookla |
+| trace | `trace` | 自动给指定用户或关键字的消息贴表情回应 | Auto-react to messages from chosen users or with keywords |
 | weather | `weather` | 天气查询 | Weather |
 
 每个命令都支持 `help`，比如 `.weather help`。只有 duckduckgo 和 speedtest 带简写，其他短命令用 `.alias` 自己加。
