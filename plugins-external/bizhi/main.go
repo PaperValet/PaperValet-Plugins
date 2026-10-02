@@ -45,6 +45,7 @@ var Metadata = &plugin.PluginMetadata{
 
 type BizhiPlugin struct {
 	http *http.Client
+	set  plugin.Settings
 }
 
 func New() *BizhiPlugin {
@@ -56,7 +57,42 @@ func (p *BizhiPlugin) Name() string        { return "bizhi" }
 func (p *BizhiPlugin) Description() string { return Metadata.Description }
 func (p *BizhiPlugin) DescEN() string      { return Metadata.DescEN }
 
+// categoryChoices for the settings panel, in display order.
+func categoryChoices() []plugin.Choice {
+	order := []string{"meizi", "dongman", "fengjing", "suiji"}
+	out := make([]plugin.Choice, 0, len(order)+1)
+	out = append(out, plugin.Choice{Value: "", Label: "随机（不指定）", LabelEN: "Random (any)"})
+	for _, k := range order {
+		n := categoryNames[k]
+		out = append(out, plugin.Choice{Value: k, Label: n[0], LabelEN: n[1]})
+	}
+	return out
+}
+
 func (p *BizhiPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
+	set, err := mgr.Host().Settings(&plugin.SettingsSpec{
+		Plugin:  p.Name(),
+		Title:   "🖼 随机壁纸",
+		TitleEN: "🖼 Wallpaper",
+		Settings: []plugin.Setting{
+			{
+				Key: "category", Label: "默认分类", LabelEN: "Default category",
+				Hint:   "不带分类发 bizhi 时用它",
+				HintEN: "Used when bizhi is sent without a category",
+				Kind:   plugin.SettingChoice, Default: "", Choices: categoryChoices(),
+			},
+			{
+				Key: "as_file", Label: "以文件发送", LabelEN: "Send as file",
+				Hint:   "发送原图文件而不是压缩图片，单次仍可用 -f 覆盖",
+				HintEN: "Send the original file instead of a photo; a single use can still pass -f",
+				Kind:   plugin.SettingToggle,
+			},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	p.set = set
 	sweepStale()
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "bizhi",
@@ -89,6 +125,13 @@ var categories = map[string]category{
 
 var defaultCategory = category{"", []string{"anime", "oil painting", "photography", "Japan", "night"}}
 
+var categoryNames = map[string][2]string{
+	"meizi":    {"美女", "People"},
+	"dongman":  {"动漫", "Anime"},
+	"fengjing": {"风景", "Scenery"},
+	"suiji":    {"随机", "Random"},
+}
+
 var categoryAliases = map[string]string{
 	"meinv": "meizi", "美女": "meizi", "people": "meizi",
 	"anime": "dongman", "动漫": "dongman",
@@ -114,7 +157,7 @@ func (p *BizhiPlugin) help(ctx *plugin.CommandContext) string {
 	return ctx.Tlocal(
 		"🖼 **随机壁纸**\n\n"+
 			"**用法**\n"+
-			plugin.Code("bizhi")+" 随机类型\n"+
+			plugin.Code("bizhi")+" 默认分类（在机器人面板设置，初始随机）\n"+
 			plugin.Code("bizhi dongman")+" 指定分类\n"+
 			plugin.Code("bizhi fengjing -f")+" 以原文件发送\n\n"+
 			"**分类**\n"+
@@ -122,10 +165,10 @@ func (p *BizhiPlugin) help(ctx *plugin.CommandContext) string {
 			"**说明**\n"+
 			"优先 wallhaven.cc 原图（≥1920×1080，16:9，优先 ≥3MB），失败回退 btstu.cn\n"+
 			"超过 Telegram 图片限制时自动改为文件发送\n\n"+
-			"💡 "+plugin.Code("-f")+" 发送源文件而非图片",
+			"💡 "+plugin.Code("-f")+" 发送源文件而非图片（默认值在机器人面板设置）",
 		"🖼 **Random wallpaper**\n\n"+
 			"**Usage**\n"+
-			plugin.Code("bizhi")+" random category\n"+
+			plugin.Code("bizhi")+" the default category (set in the bot panel, random at first)\n"+
 			plugin.Code("bizhi dongman")+" pick a category\n"+
 			plugin.Code("bizhi fengjing -f")+" send as original file\n\n"+
 			"**Categories**\n"+
@@ -133,12 +176,12 @@ func (p *BizhiPlugin) help(ctx *plugin.CommandContext) string {
 			"**Details**\n"+
 			"Original images from wallhaven.cc (≥1920×1080, 16:9, prefers ≥3MB), btstu.cn as fallback\n"+
 			"Images over Telegram's photo limit are sent as files automatically\n\n"+
-			"💡 "+plugin.Code("-f")+" sends the source file instead of a photo")
+			"💡 "+plugin.Code("-f")+" sends the source file instead of a photo (default set in the bot panel)")
 }
 
 func (p *BizhiPlugin) handleBizhi(ctx *plugin.CommandContext) error {
 	var cats []string
-	sendAsFile := false
+	sendAsFile := p.set != nil && p.set.Bool("as_file")
 	for _, a := range ctx.Args {
 		switch strings.ToLower(a) {
 		case "help":
@@ -152,6 +195,9 @@ func (p *BizhiPlugin) handleBizhi(ctx *plugin.CommandContext) error {
 		}
 	}
 	lx := ""
+	if p.set != nil {
+		lx = p.set.String("category")
+	}
 	if len(cats) > 0 {
 		var ok bool
 		if lx, ok = normalizeCategory(cats[0]); !ok {
