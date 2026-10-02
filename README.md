@@ -28,6 +28,7 @@ External plugins for [PaperValet](https://github.com/PaperValet/PaperValet) · [
 | hitokoto | `hitokoto` | 随机一言 | Random quote |
 | ip | `ip` | 查询 IP 或域名的归属地 | Look up where an IP or domain lives |
 | listusernames | `listusernames` | 列出自己的公开群组和频道 | List your public groups and channels |
+| news | `news` | 每日新闻、历史上的今天、成语和诗词 | Daily Chinese news digest |
 | premium | `premium` | 统计群里的 Premium 会员 | Count Premium members in a group |
 | rev | `rev` | 反转文字，翻转或反色媒体 | Reverse text, flip or invert media |
 | save | `save` | 保存和转发消息，绕过禁止转发 | Save messages, even from no-forward chats |
