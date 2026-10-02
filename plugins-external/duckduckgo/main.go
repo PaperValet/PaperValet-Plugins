@@ -46,6 +46,7 @@ var Metadata = &plugin.PluginMetadata{
 
 type DuckDuckGoPlugin struct {
 	http *http.Client
+	set  plugin.Settings
 }
 
 func New() *DuckDuckGoPlugin {
@@ -67,6 +68,21 @@ func (p *DuckDuckGoPlugin) Description() string { return Metadata.Description }
 func (p *DuckDuckGoPlugin) DescEN() string      { return Metadata.DescEN }
 
 func (p *DuckDuckGoPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
+	set, err := mgr.Host().Settings(&plugin.SettingsSpec{
+		Plugin:  p.Name(),
+		Title:   "🔍 DuckDuckGo",
+		TitleEN: "🔍 DuckDuckGo",
+		Settings: []plugin.Setting{{
+			Key: "limit", Label: "默认结果条数", LabelEN: "Default results",
+			Hint:   "单次搜索仍可用 -n 临时指定",
+			HintEN: "A single search can still override it with -n",
+			Kind:   plugin.SettingNumber, Default: defaultLimit, Min: 1, Max: maxLimit,
+		}},
+	})
+	if err != nil {
+		return err
+	}
+	p.set = set
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "duckduckgo",
 		Aliases:     []string{"ddg"},
@@ -97,8 +113,8 @@ type bundle struct {
 
 // ---------------------------------------------------------------- args
 
-func parseLimitAndQuery(args []string) (string, int) {
-	limit := defaultLimit
+func parseLimitAndQuery(args []string, def int) (string, int) {
+	limit := clamp(def)
 	var parts []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -132,7 +148,7 @@ func (p *DuckDuckGoPlugin) help(ctx *plugin.CommandContext) string {
 			"**用法**\n"+
 			plugin.Code("duckduckgo <关键词>")+"\n"+
 			plugin.Code("ddg <关键词>")+" 简写\n"+
-			plugin.Code("duckduckgo <关键词> -n 5")+" 条数 1–15（默认 8）\n\n"+
+			plugin.Code("duckduckgo <关键词> -n 5")+" 本次条数 1–15（默认值在机器人面板设置）\n\n"+
 			"**数据源（自动）**\n"+
 			"1\\. DuckDuckGo HTML 版（浏览器请求头）\n"+
 			"2\\. DuckDuckGo Lite 版（HTML 版被拦截时）\n"+
@@ -142,7 +158,7 @@ func (p *DuckDuckGoPlugin) help(ctx *plugin.CommandContext) string {
 			"**Usage**\n"+
 			plugin.Code("duckduckgo <query>")+"\n"+
 			plugin.Code("ddg <query>")+" short form\n"+
-			plugin.Code("duckduckgo <query> -n 5")+" result count 1–15 (default 8)\n\n"+
+			plugin.Code("duckduckgo <query> -n 5")+" result count 1–15 for this search (default set in the bot panel)\n\n"+
 			"**Sources (automatic)**\n"+
 			"1\\. DuckDuckGo HTML (browser-like headers)\n"+
 			"2\\. DuckDuckGo Lite (when HTML is blocked)\n"+
@@ -157,7 +173,11 @@ func (p *DuckDuckGoPlugin) handleSearch(ctx *plugin.CommandContext) error {
 	if a := strings.ToLower(ctx.Args[0]); len(ctx.Args) == 1 && (a == "help" || a == "h") {
 		return ctx.Edit(p.help(ctx))
 	}
-	query, limit := parseLimitAndQuery(ctx.Args)
+	def := defaultLimit
+	if p.set != nil {
+		def = p.set.Int("limit")
+	}
+	query, limit := parseLimitAndQuery(ctx.Args, def)
 	if query == "" {
 		return ctx.Edit(p.help(ctx))
 	}
