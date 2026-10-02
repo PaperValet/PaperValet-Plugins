@@ -26,6 +26,7 @@ External plugins for [PaperValet](https://github.com/PaperValet/PaperValet) · [
 | gt | `gt` | 谷歌翻译 | Google Translate |
 | hitokoto | `hitokoto` | 随机一言 | Random quote |
 | listusernames | `listusernames` | 列出自己的公开群组和频道 | List your public groups and channels |
+| premium | `premium` | 统计群里的 Premium 会员 | Count Premium members in a group |
 | rev | `rev` | 反转文字，翻转或反色媒体 | Reverse text, flip or invert media |
 | save | `save` | 保存和转发消息，绕过禁止转发 | Save messages, even from no-forward chats |
 | sendat | `sendat` | 定时发送消息，重启不丢 | Scheduled messages that survive restarts |
