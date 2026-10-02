@@ -52,6 +52,10 @@ type SavePlugin struct {
 	jobSeq  int
 	stopped bool
 	wg      sync.WaitGroup
+
+	host    plugin.Host
+	set     plugin.Settings
+	ownerID int64
 }
 
 func New() *SavePlugin {
@@ -70,6 +74,33 @@ func (p *SavePlugin) Description() string { return Metadata.Description }
 func (p *SavePlugin) DescEN() string      { return Metadata.DescEN }
 
 func (p *SavePlugin) Init(_ context.Context, mgr plugin.Manager) error {
+	p.host = mgr.Host()
+	if h := mgr.Host(); h != nil {
+		p.ownerID = h.SelfID()
+	}
+	set, err := mgr.Host().Settings(&plugin.SettingsSpec{
+		Plugin:  p.Name(),
+		Title:   "💾 保存",
+		TitleEN: "💾 Save",
+		Settings: []plugin.Setting{
+			{
+				Key: "target", Label: "默认保存目标", LabelEN: "Default target",
+				Hint:   "@用户名 / 数字 chatID / me（收藏夹）/ local（本地目录）",
+				HintEN: "@username / numeric chat id / me (Saved Messages) / local (disk)",
+				Kind:   plugin.SettingText, Default: "me", Validate: validPanelTarget,
+			},
+			{
+				Key: "show_source", Label: "保存后回复来源", LabelEN: "Reply source after saving",
+				Hint:   "保存后回复一条带原消息链接的来源消息",
+				HintEN: "Reply a source message with the original link after saving",
+				Kind:   plugin.SettingToggle,
+			},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	p.set = set
 	p.mu.Lock()
 	p.db = loadDB(p.cfgPath, p.legacy)
 	p.mu.Unlock()
@@ -77,8 +108,8 @@ func (p *SavePlugin) Init(_ context.Context, mgr plugin.Manager) error {
 		Name:        "save",
 		Description: "保存/转发消息：回复、链接、链接范围，受限会话自动下载重传，可保存到本地",
 		DescEN:      "Save/forward messages by reply, links or link ranges; re-uploads from restricted chats; can save locally",
-		Usage:       "save（回复）· save <链接…> [临时目标] · save <链接1>|<链接2> · save to <目标> · save target · save source [on|off] · save help",
-		UsageEN:     "save (reply) · save <links…> [temp target] · save <link1>|<link2> · save to <target> · save target · save source [on|off] · save help",
+		Usage:       "save（回复）· save <链接…> [临时目标] · save <链接1>|<链接2> · save help",
+		UsageEN:     "save (reply) · save <links…> [temp target] · save <link1>|<link2> · save help",
 		Plugin:      p.Name(),
 		Category:    "tools",
 		OwnerOnly:   true,
@@ -145,12 +176,18 @@ func (p *SavePlugin) beginJob(parent context.Context) (context.Context, func(), 
 
 func (p *SavePlugin) userConfig(uid int64) UserConfig {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if c, ok := p.db.Users[fmt.Sprint(uid)]; ok {
+		p.mu.Unlock()
 		if c.Target == "" {
 			c.Target = "me"
 		}
 		return c
+	}
+	p.mu.Unlock()
+	// The panel owns the owner's defaults; the legacy per-user file only
+	// supplies values for delegated users.
+	if p.set != nil && (p.ownerID == 0 || uid == p.ownerID) {
+		return UserConfig{Target: p.set.String("target"), ShowSource: p.set.Bool("show_source")}
 	}
 	return defaultConfig()
 }
@@ -190,11 +227,8 @@ func helpText(ctx *plugin.CommandContext) string {
 	b.WriteString(line(tl("save <链接…>", "save <links…>"), "批量保存链接", "save several links"))
 	b.WriteString(line(tl("save <链接1>|<链接2>", "save <link1>|<link2>"), fmt.Sprintf("保存两链接之间的消息范围（最多 %d 条）", maxRange), fmt.Sprintf("save the range between two links (max %d)", maxRange)))
 	b.WriteString(line(tl("save <链接> <临时目标>", "save <link> <temp target>"), "临时改目标（可用 local）", "temporary target (local works too)"))
-	b.WriteString("\n**" + tl("设置", "Settings") + "**\n")
-	b.WriteString(line(tl("save to <目标>", "save to <target>"), "默认目标：@user / chatid / me / local", "default target: @user / chat id / me / local"))
-	b.WriteString(line("save target", "查看默认目标", "show the default target"))
-	b.WriteString(line("save source on|off", "保存后回复来源信息", "reply source info after saving"))
-	b.WriteString(line("save source", "查看来源开关", "show the source switch"))
+	b.WriteString("\n**" + tl("设置（机器人面板）", "Settings (bot panel)") + "**\n")
+	b.WriteString(tl("默认保存目标、保存后是否回复来源，在机器人的 /menu 里调整\n", "Default target and source replies are set in the bot's /menu\n"))
 	b.WriteString("\n**local**\n")
 	b.WriteString(tl("媒体保存到 ", "Media is saved to ") + plugin.Code("save/<chatId>/") + tl("，旁路 .json 元数据并生成索引；纯文本跳过", " with a .json sidecar and an index file; text-only messages are skipped") + "\n\n")
 	b.WriteString("💡 " + tl("会话禁止转发时会自动下载后重新发送", "When a chat forbids forwarding, content is downloaded and re-sent"))
@@ -205,7 +239,6 @@ func (p *SavePlugin) handle(ctx *plugin.CommandContext) error {
 	if ctx.Message == nil || ctx.Message.Message == nil || ctx.API == nil {
 		return plugin.ErrNoMessage
 	}
-	tl := ctx.Tlocal
 	args := ctx.Args
 	sub := ""
 	if len(args) > 0 {
@@ -216,22 +249,6 @@ func (p *SavePlugin) handle(ctx *plugin.CommandContext) error {
 		if len(args) == 1 {
 			return ctx.Edit(helpText(ctx))
 		}
-	case "source":
-		return p.cmdSource(ctx, args[1:])
-	case "to":
-		if len(args) < 2 {
-			return ctx.Edit("❌ " + tl("请指定保存目标", "Please give a target") + "\n\n💡 " +
-				plugin.Code("save to @username") + " " + plugin.Code("save to -1001234567890") + " " +
-				plugin.Code("save to me") + " " + plugin.Code("save to local"))
-		}
-		return p.cmdSetTarget(ctx, strings.Join(args[1:], " "))
-	case "target":
-		if len(args) >= 2 {
-			return p.cmdSetTarget(ctx, strings.Join(args[1:], " "))
-		}
-		cfg := p.userConfig(ctx.Message.UserID)
-		return ctx.Edit("📌 " + tl("当前默认目标  ", "Default target  ") + plugin.Code(targetLabel(cfg.Target, tl)) +
-			"\n\n💡 " + plugin.Code(tl("save to <目标>", "save to <target>")))
 	}
 	return p.cmdSave(ctx)
 }
@@ -244,51 +261,6 @@ func targetLabel(t string, tl func(string, string) string) string {
 		return tl("本地 (local)", "local disk (local)")
 	}
 	return t
-}
-
-func (p *SavePlugin) cmdSetTarget(ctx *plugin.CommandContext, raw string) error {
-	tl := ctx.Tlocal
-	t, err := normalizeTarget(raw)
-	if err != nil {
-		return ctx.Edit("❌ " + tl("目标无效：支持 @用户名、数字 chatID、me 或 local", "Invalid target: use @username, numeric chat id, me or local"))
-	}
-	if t != "me" && t != "local" {
-		if _, _, err := resolveTarget(ctx, t); err != nil {
-			return ctx.Edit("❌ " + tl("无法访问目标对话 ", "Cannot access target chat ") + plugin.Code(t) + "\n" + plugin.Escape(err.Error()))
-		}
-	}
-	if err := p.updateConfig(ctx.Message.UserID, func(c *UserConfig) { c.Target = t }); err != nil {
-		return ctx.Edit("❌ " + tl("保存配置失败: ", "Failed to save config: ") + plugin.Escape(err.Error()))
-	}
-	return ctx.Edit("✅ " + tl("已设置默认保存目标为 ", "Default target set to ") + plugin.Code(targetLabel(t, tl)))
-}
-
-func (p *SavePlugin) cmdSource(ctx *plugin.CommandContext, args []string) error {
-	tl := ctx.Tlocal
-	if len(args) == 0 {
-		cfg := p.userConfig(ctx.Message.UserID)
-		state := tl("关闭 ❌", "off ❌")
-		if cfg.ShowSource {
-			state = tl("开启 ✅", "on ✅")
-		}
-		return ctx.Edit("📊 " + tl("来源显示  ", "Source info  ") + "**" + state + "**\n\n💡 " + plugin.Code("save source on|off"))
-	}
-	var on bool
-	switch strings.ToLower(args[0]) {
-	case "on":
-		on = true
-	case "off":
-		on = false
-	default:
-		return ctx.Edit("❌ " + tl("无效的参数，使用 ", "Invalid argument, use ") + plugin.Code("save source on|off"))
-	}
-	if err := p.updateConfig(ctx.Message.UserID, func(c *UserConfig) { c.ShowSource = on }); err != nil {
-		return ctx.Edit("❌ " + tl("保存配置失败: ", "Failed to save config: ") + plugin.Escape(err.Error()))
-	}
-	if on {
-		return ctx.Edit("✅ " + tl("已开启来源显示：保存后会回复一条包含原消息链接的来源消息", "Source info on: a source message with the original link is replied after saving"))
-	}
-	return ctx.Edit("✅ " + tl("已关闭来源显示", "Source info off"))
 }
 
 // resolveTarget turns a normalized target into an InputPeer and label.
