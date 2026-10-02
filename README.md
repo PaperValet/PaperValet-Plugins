@@ -33,6 +33,9 @@ External plugins for [PaperValet](https://github.com/PaperValet/PaperValet) · [
 每个命令都支持 `help`，比如 `.weather help`。只有 duckduckgo 和 speedtest 带简写，其他短命令用 `.alias` 自己加。
 Every command takes `help`, e.g. `.weather help`. Only duckduckgo and speedtest ship a short alias; add your own with `.alias`.
 
+插件的选项不走命令，都在配套机器人的 /menu 按钮面板里：weather 默认城市、gt 默认语言、duckduckgo 条数、hitokoto 默认类型、bizhi 默认分类、atadmins 召唤消息、save 保存目标、sendat 时区、speedtest 服务器和结果类型；sendat 和 speedtest 还有任务列表、附近服务器页面。
+Plugin options are not commands: they live in the companion bot's /menu panel — weather's default city, gt's default language, duckduckgo's result count, hitokoto's default type, bizhi's default category, atadmins' message, save's target, sendat's timezone, speedtest's server and result type; sendat and speedtest also add task-list and nearby-server pages.
+
 网络延迟测试已经并入内置的 `.ping`。Latency tests moved into the built-in `.ping`.
 
 ## 开发 / Development
