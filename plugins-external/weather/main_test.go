@@ -42,3 +42,15 @@ func TestExactMatch(t *testing.T) {
 		t.Fatal("nomatch")
 	}
 }
+
+func TestValidCity(t *testing.T) {
+	if got, err := validCity("  New   York "); err != nil || got != "New York" {
+		t.Fatalf("got %q %v", got, err)
+	}
+	if got, err := validCity(""); err != nil || got != "" {
+		t.Fatal("empty must clear")
+	}
+	if _, err := validCity(strings.Repeat("长", 65)); err == nil {
+		t.Fatal("too long accepted")
+	}
+}
