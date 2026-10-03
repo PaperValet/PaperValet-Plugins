@@ -25,6 +25,7 @@ External plugins for [PaperValet](https://github.com/PaperValet/PaperValet) · [
 | diss | `diss` | 儒雅随和版祖安语录 | Random polite roast |
 | duckduckgo | `duckduckgo` · `ddg` | DuckDuckGo 网页搜索 | Web search |
 | gt | `gt` | 谷歌翻译 | Google Translate |
+| his | `his` | 查看某人在群里的发言记录 | List someone's recent messages in a group |
 | hitokoto | `hitokoto` | 随机一言 | Random quote |
 | ip | `ip` | 查询 IP 或域名的归属地 | Look up where an IP or domain lives |
 | listusernames | `listusernames` | 列出自己的公开群组和频道 | List your public groups and channels |
