@@ -30,6 +30,7 @@ External plugins for [PaperValet](https://github.com/PaperValet/PaperValet) · [
 | listusernames | `listusernames` | 列出自己的公开群组和频道 | List your public groups and channels |
 | music | `music` | 通过音乐机器人搜歌发歌，支持多平台和先搜后选 | Songs via music bots, multi-platform, search then pick |
 | news | `news` | 每日新闻、历史上的今天、成语和诗词 | Daily Chinese news digest |
+| paolu | `paolu` | 一键跑路：禁言全员并清空群消息 | Mute everyone and wipe the group history |
 | premium | `premium` | 统计群里的 Premium 会员 | Count Premium members in a group |
 | rev | `rev` | 反转文字，翻转或反色媒体 | Reverse text, flip or invert media |
 | save | `save` | 保存和转发消息，绕过禁止转发 | Save messages, even from no-forward chats |
