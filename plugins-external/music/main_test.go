@@ -5,9 +5,40 @@ import (
 	"testing"
 
 	"github.com/gotd/td/tg"
+
+	"github.com/TiaraBasori/PaperValet/pkg/plugin"
 )
 
 func en(_, e string) string { return e }
+
+func TestRealReply(t *testing.T) {
+	ev := &plugin.MessageEvent{Message: &tg.Message{}}
+	if got := realReply(ev); got != 0 {
+		t.Fatal("no reply header")
+	}
+	if got := realReply(nil); got != 0 {
+		t.Fatal("nil event")
+	}
+	h := &tg.MessageReplyHeader{}
+	h.SetReplyToMsgID(42)
+	ev.Message.ReplyTo = h
+	if got := realReply(ev); got != 42 {
+		t.Fatalf("plain reply: %d", got)
+	}
+	// Plain message inside a forum topic: header points at the topic root,
+	// the song must not be attached to it.
+	ft := &tg.MessageReplyHeader{ForumTopic: true}
+	ft.SetReplyToMsgID(7)
+	ev.Message.ReplyTo = ft
+	if got := realReply(ev); got != 0 {
+		t.Fatalf("topic root treated as reply: %d", got)
+	}
+	ft.SetReplyToTopID(7)
+	ft.SetReplyToMsgID(50)
+	if got := realReply(ev); got != 50 {
+		t.Fatalf("real reply in topic: %d", got)
+	}
+}
 
 func TestParseArgs(t *testing.T) {
 	cases := []struct {

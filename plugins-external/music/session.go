@@ -49,6 +49,11 @@ func (p *MusicPlugin) open(ctx context.Context, src *source) (*session, error) {
 		select {
 		case s.events <- ev.Message:
 		default:
+			// The buffer is full only if wait already returned; dropping
+			// is expected then, but leave a trace for debugging timeouts.
+			if p.log != nil {
+				p.log.Debug("music: session event buffer full, dropping message", "bot", s.src.Bot, "id", ev.Message.ID)
+			}
 		}
 	})
 	return s, nil

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"strings"
 	"sync"
 	"time"
@@ -163,15 +164,37 @@ func (p *MusicPlugin) lifetime() context.Context {
 	return p.ctx
 }
 
+// realReply returns the id of the message the command actually replies to.
+// A plain message inside a forum topic carries a reply header pointing at
+// the topic root; sending the song as a reply to that would attach it to
+// the topic root instead of the message the user sees (same distinction as
+// save's replyTarget).
+func realReply(ev *plugin.MessageEvent) int {
+	if ev == nil || ev.Message == nil {
+		return 0
+	}
+	hdr, ok := ev.Message.ReplyTo.(*tg.MessageReplyHeader)
+	if !ok {
+		return 0
+	}
+	id, has := hdr.GetReplyToMsgID()
+	if !has || id <= 0 {
+		return 0
+	}
+	if hdr.ForumTopic {
+		if _, hasTop := hdr.GetReplyToTopID(); !hasTop {
+			return 0
+		}
+	}
+	return id
+}
+
 func (p *MusicPlugin) handle(ctx *plugin.CommandContext) error {
 	if len(ctx.Args) == 0 || (len(ctx.Args) == 1 && (strings.EqualFold(ctx.Args[0], "help") || strings.EqualFold(ctx.Args[0], "h"))) {
 		return ctx.Edit(p.help(ctx.Tlocal))
 	}
 	req := parseArgs(ctx.Args)
-	replyTo := 0
-	if ctx.Message.IsReply {
-		replyTo = ctx.Message.ReplyToID
-	}
+	replyTo := realReply(ctx.Message)
 	if req.Pick > 0 {
 		return p.pick(ctx, req.Pick, replyTo)
 	}
@@ -334,9 +357,54 @@ func (p *MusicPlugin) deliver(ctx *plugin.CommandContext, m *tg.Message, replyTo
 		req.SetReplyTo(&tg.InputReplyToMessage{ReplyToMsgID: replyTo})
 	}
 	if _, err := ctx.API.MessagesSendMedia(ctx.Context(), req); err != nil {
+		// A cached doc reference can go stale (bot re-uploaded the file);
+		// re-fetch the bot's message once and retry with the fresh
+		// reference before giving up.
+		if !strings.Contains(err.Error(), "MEDIA_EMPTY") && !strings.Contains(err.Error(), "FILE_REFERENCE") {
+			return ctx.Edit("❌ " + ctx.Tlocal("发送音频失败：", "Could not send the audio: ") + tgText(ctx.Tlocal, err))
+		}
+		if fresh := refreshAudioDoc(ctx, m); fresh != nil {
+			req.Media = &tg.InputMediaDocument{ID: &tg.InputDocument{
+				ID:            fresh.ID,
+				AccessHash:    fresh.AccessHash,
+				FileReference: fresh.FileReference,
+			}}
+			req.RandomID = rand.Int64()
+			if _, err2 := ctx.API.MessagesSendMedia(ctx.Context(), req); err2 == nil {
+				return ctx.Delete()
+			} else {
+				err = err2
+			}
+		}
 		return ctx.Edit("❌ " + ctx.Tlocal("发送音频失败：", "Could not send the audio: ") + tgText(ctx.Tlocal, err))
 	}
 	return ctx.Delete()
+}
+
+// refreshAudioDoc re-fetches the bot's audio message so its document
+// carries a fresh file reference; nil when it cannot be read.
+func refreshAudioDoc(ctx *plugin.CommandContext, m *tg.Message) *tg.Document {
+	if ctx.PeerResolver == nil || m.PeerID == nil {
+		return nil
+	}
+	chatID := plugin.ChatIDOf(m.PeerID)
+	peer, err := ctx.PeerResolver.ResolveFromChatID(ctx.Context(), chatID)
+	if err != nil {
+		return nil
+	}
+	msgs, _, _, err := plugin.GetMessages(ctx.Context(), ctx.API, peer, m.ID)
+	if err != nil {
+		return nil
+	}
+	for _, fm := range msgs {
+		if fm.ID != m.ID {
+			continue
+		}
+		if doc, _ := audioDoc(fm); doc != nil {
+			return doc
+		}
+	}
+	return nil
 }
 
 func captionFor(au *tg.DocumentAttributeAudio) string {
