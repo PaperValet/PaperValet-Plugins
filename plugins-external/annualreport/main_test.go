@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -276,5 +277,68 @@ func TestHourBar(t *testing.T) {
 	}
 	if hourBar(1, 100) != "▇" {
 		t.Fatal("small nonzero count gets one cell")
+	}
+}
+
+func TestHourHistogramMergesPairs(t *testing.T) {
+	tl := func(zh, en string) string { return en }
+	r := &Report{}
+	r.Hours[3] = 10 // odd-hour bucket: must drive the 02–04 bar
+	r.Hours[4] = 5
+	s := hourHistogram(tl, r)
+	// 12 rows for 24 buckets, 2h each
+	if got := strings.Count(s, "\n"); got != 13 { // 12 rows + peak line
+		t.Fatalf("rows = %d:\n%s", got, s)
+	}
+	for h := 0; h < 24; h += 2 {
+		if !strings.Contains(s, fmt.Sprintf("%02d–%02d", h, h+2)) {
+			t.Fatalf("missing %02d–%02d row:\n%s", h, h+2, s)
+		}
+	}
+	// 02–04 bar spans both hours (10+5=15 = max → full width)
+	if !strings.Contains(s, "02–04 "+strings.Repeat("▇", barWidth)) {
+		t.Fatalf("02–04 bar not merged/max:\n%s", s)
+	}
+	// empty pairs render no bar cells
+	if strings.Contains(s, "06–08 ▇") {
+		t.Fatalf("empty bucket drew a bar:\n%s", s)
+	}
+	// peak line still reports the exact odd hour
+	if !strings.Contains(s, "03:00") {
+		t.Fatalf("peak hour line missing:\n%s", s)
+	}
+}
+
+func TestStripRefresh(t *testing.T) {
+	cases := []struct {
+		in      []string
+		out     []string
+		refresh bool
+	}{
+		{nil, nil, false},
+		{[]string{}, []string{}, false},
+		{[]string{"2025"}, []string{"2025"}, false},
+		{[]string{"refresh"}, []string{}, true},
+		{[]string{"refresh", "2025"}, []string{"2025"}, true},
+		{[]string{"2025", "refresh"}, []string{"2025"}, true},
+		{[]string{"2025", "Refresh", "refresh"}, []string{"2025"}, true},
+		{[]string{"2025", " refresh "}, []string{"2025"}, true},
+		{[]string{"all", "REFRESH"}, []string{"all"}, true},
+		{[]string{"refreshing"}, []string{"refreshing"}, false},
+	}
+	for i, c := range cases {
+		refresh := false
+		got := stripRefresh(c.in, &refresh)
+		if refresh != c.refresh {
+			t.Fatalf("case %d: refresh = %v, want %v", i, refresh, c.refresh)
+		}
+		if len(got) != len(c.out) {
+			t.Fatalf("case %d: args = %v, want %v", i, got, c.out)
+		}
+		for j := range got {
+			if got[j] != c.out[j] {
+				t.Fatalf("case %d: args = %v, want %v", i, got, c.out)
+			}
+		}
 	}
 }

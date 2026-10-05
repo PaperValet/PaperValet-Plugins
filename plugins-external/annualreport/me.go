@@ -30,10 +30,8 @@ func (p *AnnualReportPlugin) handleMe(ctx *plugin.CommandContext) error {
 
 	year := reportYear(time.Now())
 	stats, err := dialogCensus(c, api)
-	if err != nil {
-		if ctx.Logger != nil {
-			ctx.Logger.Warn("annualreport: dialogs failed", "error", err)
-		}
+	if err != nil && ctx.Logger != nil {
+		ctx.Logger.Warn("annualreport: dialogs failed", "error", err)
 	}
 	blocked, berr := blockedCount(c, api)
 	if berr != nil && ctx.Logger != nil {
@@ -51,16 +49,24 @@ func (p *AnnualReportPlugin) handleMe(ctx *plugin.CommandContext) error {
 	b.WriteString("> " + fmt.Sprintf(tl("已生成 %d 份报告", "%d reports generated"), loadState(filepath.Join(p.dataDir(), stateFile)).ReportCount) + "\n\n")
 
 	b.WriteString("👥 **" + tl("社交网络", "Social graph") + "**\n")
-	b.WriteString("> " + fmt.Sprintf(tl("%d 个频道 · %d 个群组", "%d channels · %d groups"), stats.Channels, stats.Groups) + "\n")
-	b.WriteString("> " + fmt.Sprintf(tl("%d 个私聊 · %d 个机器人", "%d private chats · %d bots"), stats.Private, stats.Bots) + "\n")
-	b.WriteString("> " + tl("愿你的生活每天都像庆典一样开心", "May every day feel like a celebration") + "\n\n")
+	if err != nil {
+		b.WriteString("> " + tl("会话统计获取失败，请稍后重试", "Dialog census failed, try again later") + "\n\n")
+	} else {
+		b.WriteString("> " + fmt.Sprintf(tl("%d 个频道 · %d 个群组", "%d channels · %d groups"), stats.Channels, stats.Groups) + "\n")
+		b.WriteString("> " + fmt.Sprintf(tl("%d 个私聊 · %d 个机器人", "%d private chats · %d bots"), stats.Private, stats.Bots) + "\n")
+		b.WriteString("> " + tl("愿你的生活每天都像庆典一样开心", "May every day feel like a celebration") + "\n\n")
+	}
 
 	b.WriteString("🛡️ **" + tl("安全守护", "Safety") + "**\n")
-	b.WriteString("> " + fmt.Sprintf(tl("黑名单 %d 人", "%d blocked"), blocked) + "\n")
-	if blocked < 20 {
-		b.WriteString("> " + tl("你的账户真的很干净", "Your account is really clean") + "\n")
+	if berr != nil {
+		b.WriteString("> " + tl("黑名单数量获取失败，请稍后重试", "Blocklist count failed, try again later") + "\n")
 	} else {
-		b.WriteString("> " + tl("愿明年的 spam 少一些", "May next year bring less spam") + "\n")
+		b.WriteString("> " + fmt.Sprintf(tl("黑名单 %d 人", "%d blocked"), blocked) + "\n")
+		if blocked < 20 {
+			b.WriteString("> " + tl("你的账户真的很干净", "Your account is really clean") + "\n")
+		} else {
+			b.WriteString("> " + tl("愿明年的 spam 少一些", "May next year bring less spam") + "\n")
+		}
 	}
 	if user.Premium {
 		b.WriteString("\n⭐ **" + tl("会员特权", "Premium") + "**\n")

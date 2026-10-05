@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -47,7 +48,13 @@ func loadCacheEntry(dir, key string) (*cacheEntry, bool) {
 	return e, ok && e.Report != nil
 }
 
+// storeMu serializes read-modify-write cycles on the cache file so two
+// concurrent reports cannot overwrite each other's entries.
+var storeMu sync.Mutex
+
 func saveCacheEntry(dir, key string, e *cacheEntry) {
+	storeMu.Lock()
+	defer storeMu.Unlock()
 	path := filepath.Join(dir, cacheFile)
 	var c cacheFileV2
 	_ = readJSON(path, &c)

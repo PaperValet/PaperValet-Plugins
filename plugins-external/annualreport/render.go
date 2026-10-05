@@ -97,20 +97,18 @@ func mediaLines(tl func(string, string) string, r *Report, b *strings.Builder) {
 	}
 }
 
-// hourHistogram renders a compact 24-bucket histogram, 2 hours per line,
-// each line showing both hours' counts.
+// hourHistogram renders a compact 12-row histogram, one row per 2-hour
+// bucket, each bar summing both hours' counts so odd-hour activity shows.
 func hourHistogram(tl func(string, string) string, r *Report) string {
 	max := 0
-	for _, n := range r.Hours {
-		if n > max {
+	for h := 0; h < 24; h += 2 {
+		if n := r.Hours[h] + r.Hours[h+1]; n > max {
 			max = n
 		}
 	}
 	var b strings.Builder
 	for h := 0; h < 24; h += 2 {
-		n1, n2 := r.Hours[h], r.Hours[h+1]
-		_ = n2
-		b.WriteString("> " + fmt.Sprintf("%02d–%02d", h, h+2) + " " + hourBar(n1, max) + "\n")
+		b.WriteString("> " + fmt.Sprintf("%02d–%02d", h, h+2) + " " + hourBar(r.Hours[h]+r.Hours[h+1], max) + "\n")
 	}
 	peak := 0
 	peakN := 0

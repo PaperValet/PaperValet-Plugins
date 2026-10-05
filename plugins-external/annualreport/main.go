@@ -42,6 +42,7 @@ type AnnualReportPlugin struct {
 	dir    string
 	ctx    context.Context
 	cancel context.CancelFunc
+	wg     sync.WaitGroup // in-flight command scans, joined by Stop
 	host   plugin.Host
 	set    plugin.Settings
 	http   *http.Client
@@ -99,13 +100,27 @@ func (p *AnnualReportPlugin) Start(_ context.Context) error {
 	return nil
 }
 
-func (p *AnnualReportPlugin) Stop(_ context.Context) error {
+// Stop cancels scans and waits for them to finish (bounded by ctx).
+func (p *AnnualReportPlugin) Stop(ctx context.Context) error {
 	p.mu.Lock()
-	if p.cancel != nil {
-		p.cancel()
-		p.cancel = nil
-	}
+	cancel := p.cancel
+	p.cancel = nil
 	p.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if ctx == nil {
+		return nil
+	}
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 	return nil
 }
 
@@ -186,15 +201,29 @@ func (p *AnnualReportPlugin) handle(ctx *plugin.CommandContext) error {
 		return ctx.Edit(help(ctx.Tlocal))
 	}
 	refresh := false
-	args := ctx.Args
-	if len(args) > 0 && strings.EqualFold(args[0], "refresh") {
-		refresh = true
-		args = args[1:]
-	}
+	args := stripRefresh(ctx.Args, &refresh)
 	if len(args) > 0 && strings.EqualFold(args[0], "me") {
 		return p.handleMe(ctx)
 	}
 	return p.handleChat(ctx, args, refresh)
+}
+
+// stripRefresh removes a refresh token found at any position, reporting
+// whether one was seen. "annualreport 2025 refresh" is the same as
+// "annualreport refresh 2025".
+func stripRefresh(args []string, refresh *bool) []string {
+	if refresh == nil {
+		return args
+	}
+	out := args[:0]
+	for _, a := range args {
+		if strings.EqualFold(strings.TrimSpace(a), "refresh") {
+			*refresh = true
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 func (p *AnnualReportPlugin) handleChat(ctx *plugin.CommandContext, args []string, refresh bool) error {
@@ -218,7 +247,7 @@ func (p *AnnualReportPlugin) handleChat(ctx *plugin.CommandContext, args []strin
 
 	run := *ctx
 	run.Ctx = p.lifetime()
-	report, err := p.scanChat(&run, peer, chatID, per)
+	report, err := p.scanTracked(&run, peer, chatID, per)
 	if err != nil {
 		return ctx.Edit("❌ " + ctx.Tlocal("统计失败：", "Scan failed: ") + errText(ctx.Tlocal, err))
 	}
@@ -244,6 +273,13 @@ func (p *AnnualReportPlugin) sendReport(ctx *plugin.CommandContext, chunks []str
 		}
 	}
 	return nil
+}
+
+// scanTracked runs scanChat as a waitgroup-tracked unit so Stop can join it.
+func (p *AnnualReportPlugin) scanTracked(ctx *plugin.CommandContext, peer tg.InputPeerClass, chatID int64, per period) (*Report, error) {
+	p.wg.Add(1)
+	defer p.wg.Done()
+	return p.scanChat(ctx, peer, chatID, per)
 }
 
 // scanChat walks the history of peer and aggregates one period.
