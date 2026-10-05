@@ -41,6 +41,7 @@ External plugins for [PaperValet](https://github.com/PaperValet/PaperValet) · [
 | news | `news` | 每日新闻、历史上的今天、成语和诗词 | Daily Chinese news digest |
 | paolu | `paolu` | 一键跑路：禁言全员并清空群消息 | Mute everyone and wipe the group history |
 | portball | `portball` | 回复消息限时禁言，到期自动解除 | Mute someone by reply for a set time |
+| postsearch | `postsearch` | 搜索频道/群组帖子 | Search channel and group posts |
 | premium | `premium` | 统计群里的 Premium 会员 | Count Premium members in a group |
 | rev | `rev` | 反转文字，翻转或反色媒体 | Reverse text, flip or invert media |
 | save | `save` | 保存和转发消息，绕过禁止转发 | Save messages, even from no-forward chats |
