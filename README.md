@@ -24,6 +24,7 @@ External plugins for [PaperValet](https://github.com/PaperValet/PaperValet) · [
 | autochangename | `autochangename` | 自动轮换账号名字/简介 | Auto-rotate the account name or bio |
 | ban | `ban` · `unban` · `kick` · `mute` · `unmute` · `sb` · `unsb` · `refresh` | 封禁、踢出、禁言与跨群批量封禁 | Ban, kick, mute and cross-group batch bans |
 | bizhi | `bizhi` | 随机高清壁纸 | Random wallpaper |
+| checkin | `checkin` | 每日自动签到：定时向目标机器人发送签到命令并点击签到按钮 | Daily auto check-in: sends sign-in commands to target bots on schedule and clicks buttons |
 | cosplay | `cosplay` · `cos` | 随机 Cosplay 图片 | Random cosplay photos |
 | crazy4 | `crazy4` | 随机疯狂星期四文案，一轮内不重复 | Random Crazy Thursday copypasta, no repeats per round |
 | diss | `diss` | 儒雅随和版祖安语录 | Random polite roast |
