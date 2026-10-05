@@ -53,6 +53,7 @@ External plugins for [PaperValet](https://github.com/PaperValet/PaperValet) · [
 | rev | `rev` | 反转文字，翻转或反色媒体 | Reverse text, flip or invert media |
 | save | `save` | 保存和转发消息，绕过禁止转发 | Save messages, even from no-forward chats |
 | sendat | `sendat` | 定时发送消息，重启不丢 | Scheduled messages that survive restarts |
+| setu | `setu` | 通过 FinelyGirls 机器人获取二次元图片，带剧透与签到 | Anime images via the FinelyGirls bot, spoiler-wrapped, with daily check-in |
 | shift | `shift` | 批量转移消息到指定对话 | Move messages to another chat |
 | speedtest | `speedtest` · `st` | Ookla 网速测试 | Speedtest by Ookla |
 | sticker | `sticker` | 贴纸包管理、图转贴纸、贴纸转图 | Sticker pack management, photo→sticker, sticker→photo |
