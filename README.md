@@ -61,6 +61,7 @@ External plugins for [PaperValet](https://github.com/PaperValet/PaperValet) · [
 | teletype | `teletype` | 打字机效果：逐字打出文本（带光标），可自动加到自己消息上 | Typewriter effect: retype text char by char (with cursor), auto mode for own messages |
 | trace | `trace` | 自动给指定用户或关键字的消息贴表情回应 | Auto-react to messages from chosen users or with keywords |
 | weather | `weather` | 天气查询 | Weather |
+| yvlu | `yvlu` | 回复消息生成引用贴纸/图片，可存贴纸包 | Turn replied messages into quote stickers/images, saveable to a pack |
 | zpr | `zpr` | Lolicon 随机图片，多反代自动切换 | Random images via Lolicon with mirror auto-switching |
 
 每个命令都支持 `help`，比如 `.weather help`。只有 duckduckgo 和 speedtest 带简写，其他短命令用 `.alias` 自己加。
