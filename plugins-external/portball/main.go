@@ -376,8 +376,19 @@ func resultText(tl func(string, string) string, name string, secs int, reason st
 	if reason = strings.TrimSpace(reason); reason != "" {
 		b.WriteString("> " + tl("理由：", "Reason: ") + plugin.Escape(reason) + "\n")
 	}
-	b.WriteString("> " + tl("解除：", "Until: ") + until.Format("2006-01-02 15:04"))
+	// Show the UTC offset: members in other timezones would otherwise
+	// read the server-local time as their own.
+	b.WriteString("> " + tl("解除：", "Until: ") + formatUntil(until))
 	return b.String()
+}
+
+// formatUntil renders the lift time in server-local time with its UTC
+// offset (or plain UTC), so cross-timezone readers are not misled.
+func formatUntil(t time.Time) string {
+	if _, off := t.Zone(); off == 0 {
+		return t.Format("2006-01-02 15:04 UTC")
+	}
+	return t.Format("2006-01-02 15:04 (UTC-0700)")
 }
 
 func failText(tl func(string, string) string, err error) string {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/gotd/td/tg"
 )
@@ -51,6 +52,25 @@ func TestSplitArgs(t *testing.T) {
 	r, d, ok = splitArgs([]string{"发", "广告", "1h"})
 	if !ok || r != "发 广告" || d != "1h" {
 		t.Fatalf("got %q %q %v", r, d, ok)
+	}
+}
+
+func TestFormatUntil(t *testing.T) {
+	// A zoned time carries its UTC offset so cross-timezone members can
+	// read it; a UTC time is labeled plainly.
+	sh := time.FixedZone("CST", 8*3600)
+	got := formatUntil(time.Date(2026, 10, 6, 12, 0, 0, 0, sh))
+	if got != "2026-10-06 12:00 (UTC+0800)" {
+		t.Errorf("zoned = %q", got)
+	}
+	ny := time.FixedZone("EDT", -4*3600)
+	got = formatUntil(time.Date(2026, 10, 6, 12, 0, 0, 0, ny))
+	if got != "2026-10-06 12:00 (UTC-0400)" {
+		t.Errorf("negative offset = %q", got)
+	}
+	got = formatUntil(time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC))
+	if got != "2026-10-06 12:00 UTC" {
+		t.Errorf("utc = %q", got)
 	}
 }
 
