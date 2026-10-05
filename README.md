@@ -62,6 +62,7 @@ External plugins for [PaperValet](https://github.com/PaperValet/PaperValet) · [
 | teletype | `teletype` | 打字机效果：逐字打出文本（带光标），可自动加到自己消息上 | Typewriter effect: retype text char by char (with cursor), auto mode for own messages |
 | trace | `trace` | 自动给指定用户或关键字的消息贴表情回应 | Auto-react to messages from chosen users or with keywords |
 | weather | `weather` | 天气查询 | Weather |
+| whois | `whois` | 查看用户/群组详细信息 | Detailed user or chat info |
 | xmsl | `xmsl` | AI 生成一句羡慕死了回复，支持图片 | AI-generated envious one-liners, image aware |
 | yvlu | `yvlu` | 回复消息生成引用贴纸/图片，可存贴纸包 | Turn replied messages into quote stickers/images, saveable to a pack |
 | zpr | `zpr` | Lolicon 随机图片，多反代自动切换 | Random images via Lolicon with mirror auto-switching |
