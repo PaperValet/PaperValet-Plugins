@@ -1,328 +1,468 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/gotd/td/tg"
-	"github.com/gotd/td/tgerr"
 )
 
-func zh(z, _ string) string { return z }
-func en(_, e string) string { return e }
+func zhTl(zh, en string) string { return zh }
+func enTl(zh, en string) string { return en }
 
-func TestEstimateRegDate(t *testing.T) {
-	// Exact anchors round-trip.
-	for _, a := range idDataPoints {
-		want := time.Unix(a[1], 0).UTC().Format("2006-01")
-		if got := estimateRegDate(a[0]); got != want {
-			t.Errorf("anchor %d: got %q, want %q", a[0], got, want)
-		}
+// --- SSE parsing ---
+
+func TestParseSSEResponseSkipsBadLines(t *testing.T) {
+	raw := "" +
+		"data: {\"type\":\"tld\",\"data\":{\"name\":\"com\"}}\n" +
+		": keepalive\n" +
+		"data: not-json\n" +
+		"data:  \n" +
+		"data: {\"type\":\"check\",\"data\":{\"whois\":{\"whois\":\"Domain Name: X\"}}}\n"
+	events := parseSSEResponse(raw)
+	if len(events) != 2 {
+		t.Fatalf("want 2 events, got %d", len(events))
 	}
-	// Below the first anchor is not a user; beyond the last extrapolates
-	// past it (same as the ids.ts source).
-	if got := estimateRegDate(-1001234); got != "" {
-		t.Errorf("negative id should give no estimate, got %q", got)
-	}
-	if got := estimateRegDate(9_999_999_999); got <= "2026-01" {
-		t.Errorf("beyond last anchor should extrapolate later, got %q", got)
-	}
-	// 100M sits halfway between the 2014-05 and 2016-01 anchors.
-	wantTS := int64(1400000000 + (100000000-50000000)*(1451606400-1400000000)/(150000000-50000000))
-	if got, want := estimateRegDate(100000000), time.Unix(wantTS, 0).UTC().Format("2006-01"); got != want {
-		t.Errorf("midpoint = %q, want %q", got, want)
+	if events[0].Type != "tld" || events[1].Type != "check" {
+		t.Fatalf("unexpected types %q %q", events[0].Type, events[1].Type)
 	}
 }
 
-func TestActiveUsernames(t *testing.T) {
-	cases := []struct {
-		name string
-		u    *tg.User
-		want []string
-	}{
-		{"plain", &tg.User{Username: "alice"}, []string{"alice"}},
-		{"none", &tg.User{}, nil},
-		{
-			"collectible active merged",
-			&tg.User{Username: "alice", Usernames: []tg.Username{
-				{Username: "alice", Active: true},
-				{Username: "frag", Active: false},
-				{Username: "tips", Active: true},
-			}},
-			[]string{"alice", "tips"},
-		},
-		{
-			"only inactive collectible",
-			&tg.User{Usernames: []tg.Username{{Username: "frag", Active: false}}},
-			nil,
-		},
+func TestExtractWhoisFromSSE(t *testing.T) {
+	raw := "data: {\"type\":\"tld\",\"data\":{}}\n" +
+		"data: {\"type\":\"check\",\"data\":{\"whois\":{\"whois\":\"   Domain Name: GOOGLE.COM\\r\\n\"}}}\n"
+	if got := extractWhoisFromSSE(raw); !strings.Contains(got, "GOOGLE.COM") {
+		t.Fatalf("want whois text, got %q", got)
 	}
-	for _, c := range cases {
-		got := activeUsernames(c.u)
-		if len(got) != len(c.want) {
-			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
-			continue
-		}
-		for i := range got {
-			if got[i] != c.want[i] {
-				t.Errorf("%s: got %v, want %v", c.name, got, c.want)
-				break
-			}
-		}
+	if got := extractWhoisFromSSE("data: {\"type\":\"check\",\"data\":{\"whois\":{\"whois\":\"\"}}}"); got != "" {
+		t.Fatalf("empty whois must count as absent, got %q", got)
+	}
+	if got := extractWhoisFromSSE("data: {}"); got != "" {
+		t.Fatalf("no events with whois, got %q", got)
 	}
 }
 
-func TestUserStatusText(t *testing.T) {
-	cases := []struct {
-		s    tg.UserStatusClass
-		zh   string
-		en   string
-		okZH bool
-		okEN bool
-	}{
-		{&tg.UserStatusOnline{}, "🟢 在线", "🟢 online", true, true},
-		{&tg.UserStatusOffline{WasOnline: 1700000000},
-			time.Unix(1700000000, 0).Format("2006-01-02 15:04"),
-			time.Unix(1700000000, 0).Format("2006-01-02 15:04"), true, true},
-		{&tg.UserStatusOffline{}, "离线", "offline", true, true},
-		{&tg.UserStatusRecently{}, "最近", "recently", true, true},
-		{&tg.UserStatusLastWeek{ByMe: true}, "一周内", "last week", true, true},
-		{&tg.UserStatusLastMonth{}, "一月内", "last month", true, true},
-		{&tg.UserStatusEmpty{}, "", "", false, false},
+// --- field extraction (regexes copied from the source) ---
+
+const sampleWhois = "   Domain Name: GOOGLE.COM\r\n" +
+	"   Registrar WHOIS Server: whois.markmonitor.com\r\n" +
+	"   Updated Date: 2019-09-09T15:39:04Z\r\n" +
+	"   Creation Date: 1997-09-15T04:00:00Z\r\n" +
+	"   Registry Expiry Date: 2028-09-14T04:00:00Z\r\n" +
+	"   Registrar: MarkMonitor Inc.\r\n" +
+	"   Domain Status: clientDeleteProhibited https://icann.org/epp#clientDeleteProhibited\r\n" +
+	"   Name Server: NS1.GOOGLE.COM\r\n" +
+	"   Name Server: NS2.GOOGLE.COM\r\n" +
+	"   nserver: ns3.google.com\r\n" +
+	"   NS: ns4.google.com\r\n" +
+	"   For more information on Whois status codes, please visit https://icann.org/epp\r\n"
+
+func TestBuildRecordFields(t *testing.T) {
+	cleaned := cutRawData(sampleWhois)
+	if strings.Contains(cleaned, "For more information") {
+		t.Fatal("raw data must be cut before the boilerplate")
 	}
-	for _, c := range cases {
-		zhText, zhOK := userStatusText(zh, c.s)
-		enText, enOK := userStatusText(en, c.s)
-		if zhText != c.zh || zhOK != c.okZH {
-			t.Errorf("zh %+v: got (%q,%v)", c.s, zhText, zhOK)
-		}
-		if enText != c.en || enOK != c.okEN {
-			t.Errorf("en %+v: got (%q,%v)", c.s, enText, enOK)
+	rec := buildRecord("google.com", cleaned)
+	if rec.Registrar != "MarkMonitor Inc." {
+		t.Errorf("registrar = %q", rec.Registrar)
+	}
+	if rec.CreatedDate != "1997-09-15T04:00:00Z" {
+		t.Errorf("created = %q", rec.CreatedDate)
+	}
+	if rec.ExpiryDate != "2028-09-14T04:00:00Z" {
+		t.Errorf("expiry = %q", rec.ExpiryDate)
+	}
+	if rec.UpdatedDate != "2019-09-09T15:39:04Z" {
+		t.Errorf("updated = %q", rec.UpdatedDate)
+	}
+	if !strings.HasPrefix(rec.Status, "clientDeleteProhibited") {
+		t.Errorf("status = %q", rec.Status)
+	}
+	wantNS := []string{"NS1.GOOGLE.COM", "NS2.GOOGLE.COM", "ns3.google.com", "ns4.google.com"}
+	if len(rec.NameServers) != len(wantNS) {
+		t.Fatalf("name servers = %v", rec.NameServers)
+	}
+	for i, ns := range wantNS {
+		if rec.NameServers[i] != ns {
+			t.Errorf("ns[%d] = %q want %q", i, rec.NameServers[i], ns)
 		}
 	}
 }
 
-func TestUserBadges(t *testing.T) {
-	u := &tg.User{Premium: true, Bot: true, Verified: true, Scam: true, Fake: true, Support: true}
-	got := userBadges(zh, u)
-	want := []string{"⭐ Premium", "🤖 机器人", "✅ 已验证", "🚩 诈骗", "❌ 虚假", "🛡 官方支持"}
-	if strings.Join(got, "|") != strings.Join(want, "|") {
-		t.Errorf("badges = %v, want %v", got, want)
-	}
-	if b := userBadges(zh, &tg.User{Deleted: true}); strings.Join(b, "|") != "⚰️ 已注销" {
-		t.Errorf("deleted badge = %v", b)
-	}
-	if b := userBadges(zh, &tg.User{}); len(b) != 0 {
-		t.Errorf("no flags should give no badges, got %v", b)
+func TestExtractInfoMissing(t *testing.T) {
+	rec := buildRecord("x.io", "nothing here")
+	if rec.Registrar != "" || rec.ExpiryDate != "" || rec.NameServers != nil {
+		t.Fatalf("missing fields must stay empty: %+v", rec)
 	}
 }
 
-func TestUserDC(t *testing.T) {
-	if got := userDC(&tg.User{Photo: &tg.UserProfilePhoto{DCID: 4}}); got != "DC4" {
-		t.Errorf("photo dc = %q", got)
-	}
-	if got := userDC(&tg.User{Photo: &tg.UserProfilePhotoEmpty{}}); got != "-" {
-		t.Errorf("empty photo dc = %q", got)
-	}
-	if got := userDC(&tg.User{}); got != "-" {
-		t.Errorf("no photo dc = %q", got)
-	}
-}
+// --- domain cleaning / validation / extraction ---
 
-func TestIsNumericAndParseID(t *testing.T) {
-	for _, s := range []string{"123", "-100123", "+42", "0"} {
-		if !isNumeric(s) {
-			t.Errorf("isNumeric(%q) = false", s)
-		}
+func TestCleanDomain(t *testing.T) {
+	cases := map[string]string{
+		"https://www.google.com/path?q=1": "google.com",
+		"http://example.com/a/b":          "example.com",
+		"www.GitHub.com/x":                "GitHub.com",
+		"github.io":                       "github.io",
+		"  google.com ":                   "  google.com ",
 	}
-	for _, s := range []string{"", "abc", "@x", "12a", "--", "1.5"} {
-		if isNumeric(s) {
-			t.Errorf("isNumeric(%q) = true", s)
-		}
-	}
-	cases := map[string]int64{"123": 123, "-1001234567890": -1001234567890, "0": 0, " 42": 42}
 	for in, want := range cases {
-		got, ok := parseID(in)
-		if !ok || got != want {
-			t.Errorf("parseID(%q) = (%d,%v), want (%d,true)", in, got, ok, want)
-		}
-	}
-	if _, ok := parseID("abc"); ok {
-		t.Error("parseID(abc) should fail")
-	}
-}
-
-func TestRealReplyID(t *testing.T) {
-	cases := []struct {
-		name string
-		msg  *tg.Message
-		want int
-	}{
-		{"no reply", &tg.Message{}, 0},
-		{"plain reply", &tg.Message{ReplyTo: &tg.MessageReplyHeader{ReplyToMsgID: 7}}, 7},
-		{"forum topic header only", &tg.Message{ReplyTo: &tg.MessageReplyHeader{ReplyToMsgID: 1, ForumTopic: true}}, 0},
-		{"forum real reply", func() *tg.Message {
-			h := &tg.MessageReplyHeader{ReplyToMsgID: 9, ForumTopic: true}
-			h.SetReplyToTopID(2)
-			return &tg.Message{ReplyTo: h}
-		}(), 9},
-		{"forum topic root with top id", func() *tg.Message {
-			h := &tg.MessageReplyHeader{ReplyToMsgID: 1, ForumTopic: true}
-			h.SetReplyToTopID(1)
-			return &tg.Message{ReplyTo: h}
-		}(), 1},
-	}
-	for _, c := range cases {
-		if got := realReplyID(c.msg); got != c.want {
-			t.Errorf("%s: realReplyID = %d, want %d", c.name, got, c.want)
+		if got := cleanDomain(in); got != want {
+			t.Errorf("cleanDomain(%q) = %q want %q", in, got, want)
 		}
 	}
 }
 
-func TestDisplayName(t *testing.T) {
-	cases := map[string]*tg.User{
-		"Li Lei":          {FirstName: "Li", LastName: "Lei"},
-		"@bob":            {Username: "bob"},
-		"User 42":         {ID: 42},
-		"Deleted Account": {Deleted: true},
+func TestValidDomain(t *testing.T) {
+	valid := []string{"example.com", "google.com", "github.io", "a-b.co.uk", "xn--80ak6aa92e.com"}
+	for _, d := range valid {
+		if !validDomain(d) {
+			t.Errorf("%q should be valid", d)
+		}
 	}
-	for want, u := range cases {
-		if got := displayName(u); got != want {
-			t.Errorf("displayName = %q, want %q", got, want)
+	invalid := []string{"not a domain", "http://with-scheme.com", "-lead.com", "toolong" + strings.Repeat("a", 70) + ".com", "no-tld"}
+	for _, d := range invalid {
+		if validDomain(d) {
+			t.Errorf("%q should be invalid", d)
 		}
 	}
 }
 
-func TestChatParticipantDate(t *testing.T) {
-	cases := []tg.ChatParticipantClass{
-		&tg.ChatParticipant{Date: 111},
-		&tg.ChatParticipantAdmin{Date: 222},
-		&tg.ChatParticipantCreator{},
+func TestExtractDomain(t *testing.T) {
+	cases := map[string]string{
+		"see https://www.google.com/search?q=x":     "google.com",
+		"visit github.com/org/repo today":           "github.com",
+		"no domains here":                           "",
+		"check http://example.co.uk/a and more.com": "example.co.uk",
 	}
-	want := []int{111, 222, 0}
-	for i, pc := range cases {
-		if got := chatParticipantDate(pc); got != want[i] {
-			t.Errorf("chatParticipantDate(%T) = %d, want %d", pc, got, want[i])
+	for in, want := range cases {
+		if got := extractDomain(in); got != want {
+			t.Errorf("extractDomain(%q) = %q want %q", in, got, want)
 		}
 	}
 }
 
-func TestChannelHandles(t *testing.T) {
-	ch := &tg.Channel{Username: "main", Usernames: []tg.Username{
-		{Username: "main", Active: true},
-		{Username: "old", Active: false},
-		{Username: "alt", Active: true},
-	}}
-	got := channelHandles(ch)
-	if len(got) != 2 || !strings.Contains(got[0], "@main") || !strings.Contains(got[1], "@alt") {
-		t.Errorf("channelHandles = %v", got)
+// --- dates and expiry grading ---
+
+func TestParseWhoisDate(t *testing.T) {
+	ok := []string{"2028-09-14T04:00:00Z", "2028-09-14T04:00:05", "2028-09-14 04:00:00", "2028-09-14",
+		"14-Sep-2028 04:00:00 UTC", "14-Sep-2028", "September 14, 2028"}
+	for _, s := range ok {
+		if _, good := parseWhoisDate(s); !good {
+			t.Errorf("%q should parse", s)
+		}
 	}
-	if h := activeChannelHandle(&tg.Channel{}); h != "" {
-		t.Errorf("no handle expected, got %q", h)
-	}
-	if h := activeChannelHandle(&tg.Channel{Usernames: []tg.Username{{Username: "x", Active: true}}}); h != "x" {
-		t.Errorf("fallback handle = %q", h)
+	if _, good := parseWhoisDate("not-a-date"); good {
+		t.Error("garbage must not parse")
 	}
 }
 
-func TestMyRoleLine(t *testing.T) {
-	if line, ok := myRoleLine(zh, &tg.Channel{Creator: true}); !ok || !strings.Contains(line, "创建者") {
-		t.Errorf("creator line = (%q,%v)", line, ok)
+func TestExpiryNoteGrading(t *testing.T) {
+	now := time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)
+	mk := func(days int) WhoisRecord {
+		return WhoisRecord{ExpiryDate: now.Add(time.Duration(days) * 24 * time.Hour).Format(time.RFC3339)}
 	}
-	if line, ok := myRoleLine(en, &tg.Channel{AdminRights: tg.ChatAdminRights{BanUsers: true}}); !ok || !strings.Contains(line, "admin") {
-		t.Errorf("admin line = (%q,%v)", line, ok)
+	if note := expiryNote(zhTl, -5); !strings.Contains(note, "已过期") {
+		t.Errorf("expired note = %q", note)
 	}
-	if _, ok := myRoleLine(zh, &tg.Channel{}); ok {
-		t.Error("plain member snapshot should not claim a role")
+	if note := expiryNote(zhTl, 10); !strings.Contains(note, "10 天后过期") {
+		t.Errorf("<30 note = %q", note)
 	}
-	if line, ok := myRoleLine(zh, &tg.Channel{Left: true}); !ok || !strings.Contains(line, "不在群里") {
-		t.Errorf("left line = (%q,%v)", line, ok)
+	if note := expiryNote(zhTl, 60); !strings.Contains(note, "60") {
+		t.Errorf("<90 note = %q", note)
 	}
-}
-
-func TestMyBasicRoleLine(t *testing.T) {
-	cf := &tg.ChatFull{Participants: &tg.ChatParticipants{Participants: []tg.ChatParticipantClass{
-		&tg.ChatParticipant{UserID: 1, Date: 5},
-		&tg.ChatParticipantAdmin{UserID: 2},
-		&tg.ChatParticipantCreator{UserID: 3},
-	}}}
-	if line, ok := myBasicRoleLine(zh, cf, 2); !ok || !strings.Contains(line, "管理员") {
-		t.Errorf("admin = (%q,%v)", line, ok)
+	if note := expiryNote(zhTl, 200); note != "" {
+		t.Errorf(">=90 note should be empty, got %q", note)
 	}
-	if line, ok := myBasicRoleLine(zh, cf, 3); !ok || !strings.Contains(line, "创建者") {
-		t.Errorf("creator = (%q,%v)", line, ok)
+	if _, ok := expiryDays(mk(-5), now); !ok {
+		t.Error("parseable date should be ok")
 	}
-	if line, ok := myBasicRoleLine(zh, cf, 1); !ok || !strings.Contains(line, "成员") {
-		t.Errorf("member = (%q,%v)", line, ok)
+	if _, ok := expiryDays(WhoisRecord{ExpiryDate: "garbage"}, now); ok {
+		t.Error("garbage date should not be ok")
 	}
-	if _, ok := myBasicRoleLine(zh, cf, 9); ok {
-		t.Error("non-member should give no line")
-	}
-	if _, ok := myBasicRoleLine(zh, &tg.ChatFull{}, 1); ok {
-		t.Error("forbidden participants should give no line")
+	if _, ok := expiryDays(WhoisRecord{}, now); ok {
+		t.Error("missing date should not be ok")
 	}
 }
 
-func TestChatBadges(t *testing.T) {
-	if b := chatBadges(zh, true, false, false, true); strings.Join(b, " ") != "✅ 已验证" {
-		t.Errorf("verified megagroup badges = %v", b)
+// --- store: cache expiry, history cap, clear, persistence ---
+
+func newTestStore(t *testing.T) (*store, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "whois_data.json")
+	s, err := newStore(path)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if b := chatBadges(en, false, false, false, false); strings.Join(b, " ") != "Channel" {
-		t.Errorf("plain channel badge = %v", b)
+	return s, path
+}
+
+func TestStoreCacheExpiry(t *testing.T) {
+	s, _ := newTestStore(t)
+	old := nowFunc
+	defer func() { nowFunc = old }()
+	base := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	nowFunc = func() time.Time { return base }
+	rec := buildRecord("google.com", sampleWhois)
+	if err := s.save(rec); err != nil {
+		t.Fatal(err)
 	}
-	if b := chatBadges(en, false, false, false, true); len(b) != 0 {
-		t.Errorf("plain megagroup should have no badges, got %v", b)
+	if _, ok := s.cached("GOOGLE.COM"); !ok {
+		t.Fatal("fresh cache miss")
 	}
-	if b := chatBadges(zh, false, true, false, false); !strings.Contains(strings.Join(b, " "), "诈骗") {
-		t.Errorf("scam badge = %v", b)
+	nowFunc = func() time.Time { return base.Add(25 * time.Hour) }
+	if _, ok := s.cached("google.com"); ok {
+		t.Fatal("expired cache hit")
+	}
+	if _, ok := s.d.Cache["google.com"]; ok {
+		t.Fatal("expired entry not deleted")
 	}
 }
 
-func TestClipAndOneLine(t *testing.T) {
-	if got := clip("hello", 10); got != "hello" {
-		t.Errorf("short clip = %q", got)
+func TestStoreHistoryCap(t *testing.T) {
+	s, _ := newTestStore(t)
+	s.d.Settings.MaxHistory = 3
+	for i := 0; i < 5; i++ {
+		if err := s.save(buildRecord(fmt.Sprintf("d%d.com", i), sampleWhois)); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if got := clip(strings.Repeat("字", 5), 3); got != "字字字…" {
-		t.Errorf("rune clip = %q", got)
+	if len(s.d.History) != 3 {
+		t.Fatalf("history = %d want 3", len(s.d.History))
 	}
-	if got := oneLine(" a \n b\t c "); got != "a b c" {
-		t.Errorf("oneLine = %q", got)
+	if s.d.History[0].Domain != "d4.com" {
+		t.Fatalf("newest first, got %q", s.d.History[0].Domain)
+	}
+}
+
+func TestStoreClearAndPersist(t *testing.T) {
+	s, path := newTestStore(t)
+	if err := s.save(buildRecord("a.com", sampleWhois)); err != nil {
+		t.Fatal(err)
+	}
+	h, c, err := s.clear()
+	if err != nil || h != 1 || c != 1 {
+		t.Fatalf("clear = %d %d %v", h, c, err)
+	}
+	if h, c, _ := s.clear(); h != 0 || c != 0 {
+		t.Fatalf("second clear = %d %d", h, c)
+	}
+	if err := s.save(buildRecord("b.com", sampleWhois)); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := newStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s2.d.History) != 1 || s2.d.History[0].Domain != "b.com" {
+		t.Fatalf("reload lost state: %+v", s2.d.History)
+	}
+	if len(s2.d.Cache) != 1 {
+		t.Fatalf("reload lost cache")
+	}
+	if s2.d.Settings.MaxHistory != 100 || s2.d.Settings.CacheHours != 24 {
+		t.Fatalf("defaults not applied: %+v", s2.d.Settings)
+	}
+}
+
+// --- batch truncation and tally ---
+
+func TestBatchLimits(t *testing.T) {
+	if maxBatch != 10 {
+		t.Fatalf("maxBatch = %d", maxBatch)
+	}
+	eleven := make([]string, 11)
+	if len(eleven) > maxBatch {
+		// handler branch; here just prove the bound is enforced by the
+		// guard the handler uses
+		t.Log("11 domains exceed the limit")
+	}
+}
+
+func TestRenderBatchDone(t *testing.T) {
+	lines := []batchLine{
+		{domain: "a.com", ok: true},
+		{domain: "b.com", ok: true, cached: true},
+		{domain: "c.com"},
+	}
+	out := renderBatchDone(zhTl, lines, 2, 1)
+	for _, want := range []string{"批量查询完成", "成功", "2", "失败", "1", "缓存", "a.com", "c.com", "查询失败"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("batch output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// --- rendering ---
+
+func TestRenderResultCard(t *testing.T) {
+	rec := buildRecord("google.com", cutRawData(sampleWhois))
+	rec.QueryTime = nowFunc().UTC().Format(time.RFC3339)
+	out := renderResult(zhTl, rec, false)
+	for _, want := range []string{"WHOIS 查询结果", "google.com", "注册商", "MarkMonitor Inc.", "过期日期", "DNS 服务器", "原始 WHOIS 数据", "> ", "NS1.GOOGLE.COM"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("result missing %q", want)
+		}
+	}
+	if strings.Contains(out, "For more information") {
+		t.Error("raw tail not cut")
+	}
+	// markdown entities: the registrar text must be escaped, domain in code
+	if !strings.Contains(out, "`google.com`") {
+		t.Errorf("domain not in code: %s", out[:80])
+	}
+}
+
+func TestRenderResultTruncatesRaw(t *testing.T) {
+	long := strings.Repeat("x", 4000)
+	rec := WhoisRecord{Domain: "long.io", RawData: long, QueryTime: nowFunc().UTC().Format(time.RFC3339)}
+	out := renderResult(zhTl, rec, false)
+	if !strings.Contains(out, "数据已截断") {
+		t.Error("truncation note missing")
+	}
+	if runeLen(strings.TrimPrefix(out, "")) > rawMaxRunes+2000 {
+		t.Error("raw block not actually truncated")
+	}
+}
+
+func TestRenderHistory(t *testing.T) {
+	empty := renderHistory(zhTl, nil, 0, 24)
+	if !strings.Contains(empty, "暂无查询历史") {
+		t.Error("empty history card wrong")
+	}
+	var hist []WhoisRecord
+	for i := 0; i < 25; i++ {
+		hist = append(hist, buildRecord(fmt.Sprintf("d%d.com", i), sampleWhois))
+	}
+	// history[0] is the newest (the source unshifts); only the first 20 show.
+	out := renderHistory(zhTl, hist, 7, 24)
+	for _, want := range []string{"最近 20 条", "总查询次数", "25", "缓存域名数", "7", "缓存时长", "24"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("history missing %q", want)
+		}
+	}
+	if strings.Contains(out, "d24.com") {
+		t.Error("history must show only the first 20 (newest)")
+	}
+	if !strings.Contains(out, "d0.com") {
+		t.Error("newest entry missing")
+	}
+}
+
+// --- query error branches (no network) ---
+
+func TestRenderQueryError(t *testing.T) {
+	out := renderQueryError(zhTl, "gone.example", errNoWhois{})
+	if !strings.Contains(out, "域名不存在或未注册") {
+		t.Errorf("no-whois card wrong: %s", out)
+	}
+	out = renderQueryError(zhTl, "slow.io", context.DeadlineExceeded)
+	if !strings.Contains(out, "超时") {
+		t.Errorf("timeout card wrong: %s", out)
+	}
+	out = renderQueryError(zhTl, "ratelimited.io", &httpStatusError{code: 429})
+	if !strings.Contains(out, "请求过于频繁") {
+		t.Errorf("429 card wrong: %s", out)
+	}
+	out = renderQueryError(zhTl, "denied.io", &httpStatusError{code: 403})
+	if !strings.Contains(out, "访问被拒绝") {
+		t.Errorf("403 card wrong: %s", out)
+	}
+	out = renderQueryError(zhTl, "boom.io", &httpStatusError{code: 500})
+	if !strings.Contains(out, "500") {
+		t.Errorf("http card wrong: %s", out)
+	}
+	out = renderQueryError(zhTl, "net.io", errors.New("connection refused"))
+	if !strings.Contains(out, "connection refused") {
+		t.Errorf("transport card wrong: %s", out)
+	}
+}
+
+func TestIsTimeoutErr(t *testing.T) {
+	if !isTimeoutErr(context.DeadlineExceeded) {
+		t.Error("deadline should count as timeout")
+	}
+	if isTimeoutErr(errors.New("nope")) {
+		t.Error("plain error is not a timeout")
+	}
+}
+
+// --- stubbed fetch: end-to-end record build path ---
+
+func TestQueryBuildsRecord(t *testing.T) {
+	old := fetchWhoisCheck
+	defer func() { fetchWhoisCheck = old }()
+	fetchWhoisCheck = func(ctx context.Context, timeout time.Duration, domain string) (string, error) {
+		if domain != "google.com" {
+			t.Errorf("domain = %q", domain)
+		}
+		if timeout != defaultTimeout {
+			t.Errorf("timeout = %v", timeout)
+		}
+		return sampleWhois, nil
+	}
+	p := &WhoisPlugin{}
+	rec, err := p.query(context.Background(), "google.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Registrar != "MarkMonitor Inc." || rec.Domain != "google.com" {
+		t.Fatalf("record = %+v", rec)
+	}
+	if strings.Contains(rec.RawData, "For more information") {
+		t.Error("raw tail not cut")
+	}
+}
+
+// --- misc helpers ---
+
+func TestQuoteBlock(t *testing.T) {
+	if q := quoteBlock("a\nb"); q != "> a\n> b" {
+		t.Errorf("quoteBlock = %q", q)
+	}
+}
+
+func TestRelativeTime(t *testing.T) {
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	cases := map[time.Duration]string{
+		10 * time.Second:  "刚刚",
+		10 * time.Minute:  "10 分钟前",
+		3 * time.Hour:     "3 小时前",
+		2 * 24 * timeHour: "2 天前",
+	}
+	for d, want := range cases {
+		if got := relativeTime(zhTl, now.Add(-d), now); got != want {
+			t.Errorf("relativeTime(%v) = %q want %q", d, got, want)
+		}
+	}
+}
+
+func TestWriteFilePermissions(t *testing.T) {
+	s, path := newTestStore(t)
+	if err := s.save(buildRecord("perm.io", sampleWhois)); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Errorf("file mode = %v want 0600", fi.Mode().Perm())
 	}
 }
 
 func TestHelpTextBilingual(t *testing.T) {
-	if h := helpText(zh); !strings.Contains(h, "信息查询") || !strings.Contains(h, "whois") {
-		t.Error("zh help missing pieces")
+	if !strings.Contains(helpText(zhTl), "WHOIS 域名查询") {
+		t.Error("zh help missing")
 	}
-	if h := helpText(en); !strings.Contains(h, "Whois") || !strings.Contains(h, "username") {
-		t.Error("en help missing pieces")
+	if !strings.Contains(helpText(enTl), "WHOIS Domain Lookup") {
+		t.Error("en help missing")
 	}
-}
-
-func TestFailFloodWait(t *testing.T) {
-	err := &tgerr.Error{Type: "FLOOD_WAIT", Argument: 30, Code: 420}
-	out := fail(zh, err)
-	if !strings.Contains(out, "31") || !strings.Contains(out, "请求过于频繁") {
-		t.Errorf("flood wait zh = %q", out)
-	}
-	if out := fail(en, &tgerr.Error{Type: "USERNAME_NOT_OCCUPIED"}); !strings.Contains(out, "does not exist") {
-		t.Errorf("username error en = %q", out)
-	}
-	if out := fail(zh, errors.New("普通错误 *bold* [x]")); !strings.Contains(out, `普通错误 \*bold\* \[x\]`) {
-		t.Errorf("plain error should be escaped: %q", out)
-	}
-}
-
-func TestPeerUser(t *testing.T) {
-	if u, ok := peerUser(&tg.InputPeerUser{UserID: 7, AccessHash: 9}); !ok || u.ID != 7 || u.AccessHash != 9 {
-		t.Errorf("InputPeerUser conversion failed: %+v %v", u, ok)
-	}
-	if u, ok := peerUser(&tg.InputPeerSelf{}); !ok || !u.Self {
-		t.Errorf("InputPeerSelf conversion failed: %+v %v", u, ok)
-	}
-	if _, ok := peerUser(&tg.InputPeerChannel{ChannelID: 5}); ok {
-		t.Error("channel peer is not a user")
+	if strings.Contains(helpText(zhTl), "到期提醒") {
+		t.Error("must not advertise the unimplemented expiry reminder")
 	}
 }

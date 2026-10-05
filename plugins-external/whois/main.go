@@ -2,25 +2,37 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
-
-	"github.com/gotd/td/tg"
+	"time"
 
 	"github.com/TiaraBasori/PaperValet/pkg/plugin"
 )
 
 var Metadata = &plugin.PluginMetadata{
 	Name:        "whois",
-	Description: "查看用户/群组详细信息",
-	DescEN:      "Detailed user or chat info",
+	Description: "域名 WHOIS 注册信息查询",
+	DescEN:      "Domain WHOIS registration lookup",
 	Version:     "1.0.0",
 	Author:      "PaperValet",
 	MinVersion:  "0.1.0",
 }
 
-type WhoisPlugin struct{}
+const (
+	defaultTimeout = 15 * time.Second
+	minTimeout     = 5
+	maxTimeout     = 60
+	maxBatch       = 10
+	batchGap       = 500 * time.Millisecond
+	dataFile       = "whois_data.json"
+)
+
+// WhoisPlugin answers the whois command backed by the namebeta check API.
+type WhoisPlugin struct {
+	set   plugin.Settings
+	store *store
+}
 
 func New() *WhoisPlugin { return &WhoisPlugin{} }
 
@@ -29,14 +41,39 @@ func (p *WhoisPlugin) Description() string { return Metadata.Description }
 func (p *WhoisPlugin) DescEN() string      { return Metadata.DescEN }
 
 func (p *WhoisPlugin) Init(_ context.Context, mgr plugin.Manager) error {
+	set, err := mgr.Host().Settings(&plugin.SettingsSpec{
+		Plugin:  p.Name(),
+		Title:   "🔎 WHOIS 查询",
+		TitleEN: "🔎 WHOIS Lookup",
+		Settings: []plugin.Setting{{
+			Key: "timeout", Label: "超时（秒）", LabelEN: "Timeout (seconds)",
+			Hint:    "域名查询超时时间",
+			HintEN:  "Timeout for domain queries",
+			Kind:    plugin.SettingNumber,
+			Default: 15, Min: minTimeout, Max: maxTimeout,
+		}},
+	})
+	if err != nil {
+		return err
+	}
+	p.set = set
+
+	dir, err := mgr.Host().DataDir(p.Name())
+	if err != nil {
+		return err
+	}
+	p.store, err = newStore(filepath.Join(dir, dataFile))
+	if err != nil {
+		return err
+	}
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "whois",
-		Description: "查询用户或群组的详细资料卡片",
-		DescEN:      "Show a detailed info card of a user or chat",
-		Usage:       "whois [回复 | @用户名 | ID]",
-		UsageEN:     "whois [reply | @username | ID]",
+		Description: "查询域名 WHOIS 注册信息（注册商/日期/DNS），支持批量与历史",
+		DescEN:      "Look up domain WHOIS data (registrar/dates/DNS), with batch and history",
+		Usage:       "whois <域名> · whois batch <域名...> · whois history · whois clear · 回复含域名的消息: whois",
+		UsageEN:     "whois <domain> · whois batch <domain...> · whois history · whois clear · reply to a domain message: whois",
 		Plugin:      p.Name(),
-		Category:    "info",
+		Category:    "tools",
 		OwnerOnly:   true,
 		Handler:     p.handle,
 	})
@@ -45,183 +82,246 @@ func (p *WhoisPlugin) Init(_ context.Context, mgr plugin.Manager) error {
 func (p *WhoisPlugin) Start(context.Context) error { return nil }
 func (p *WhoisPlugin) Stop(context.Context) error  { return nil }
 
-func (p *WhoisPlugin) handle(ctx *plugin.CommandContext) error {
-	if ctx.Message == nil || ctx.Message.Message == nil || ctx.API == nil {
+// timeout reads the panel timeout setting, falling back to 15s.
+func (p *WhoisPlugin) timeout() time.Duration {
+	if p.set == nil {
+		return defaultTimeout
+	}
+	sec := p.set.Int("timeout")
+	if sec < minTimeout {
+		return defaultTimeout
+	}
+	return time.Duration(sec) * time.Second
+}
+
+func (p *WhoisPlugin) handle(c *plugin.CommandContext) error {
+	if c.Message == nil || c.Message.Message == nil || c.API == nil {
 		return plugin.ErrNoMessage
 	}
-	if len(ctx.Args) == 1 && strings.EqualFold(ctx.Args[0], "help") {
-		return ctx.Edit(helpText(ctx.Tlocal))
+	tl := c.Tlocal
+	args := c.Args
+	sub := ""
+	if len(args) > 0 {
+		sub = strings.ToLower(args[0])
 	}
-	_ = ctx.Edit("🔍 " + ctx.Tlocal("正在查询…", "Looking up…"))
 
-	res, err := p.resolveTarget(ctx)
-	if err != nil {
-		return ctx.Edit(fail(ctx.Tlocal, err))
-	}
-	var text string
-	if res.user != nil {
-		text, err = renderUser(ctx, res.user)
-	} else {
-		text, err = renderChat(ctx, res.peer)
-	}
-	if err != nil {
-		return ctx.Edit(fail(ctx.Tlocal, err))
-	}
-	return ctx.Edit(text)
-}
-
-// target is the resolved command target: exactly one of user (a personal
-// user) and peer (a chat/channel input peer) is set.
-type target struct {
-	user *tg.User
-	peer tg.InputPeerClass
-}
-
-// resolveTarget decides what to look up:
-//
-//  1. reply — GetMessages + FromID (PeerChannel = channel identity → whois
-//     that channel; no FromID = anonymous admin → whois the current group);
-//  2. @username — ResolveUsername;
-//  3. numeric id — positive users, -100… channels, -… basic groups;
-//  4. nothing — the account itself.
-//
-// Resolve failures fall through to a hint to try @ or a reply.
-func (p *WhoisPlugin) resolveTarget(ctx *plugin.CommandContext) (target, error) {
-	tl := ctx.Tlocal
-	arg := strings.TrimSpace(ctx.GetArg(0))
-	if arg == "" && realReplyID(ctx.Message.Message) != 0 {
-		return p.resolveReply(ctx)
-	}
 	switch {
-	case strings.HasPrefix(arg, "@"):
-		peer, err := ctx.PeerResolver.ResolveUsername(ctx.Context(), strings.TrimPrefix(arg, "@"))
-		if err != nil {
-			return target{}, err
-		}
-		if user, ok := peerUser(peer); ok {
-			return target{user: user}, nil
-		}
-		return target{peer: peer}, nil
-	case isNumeric(arg):
-		id, _ := parseID(arg)
-		return p.resolveID(ctx, id)
-	case arg == "":
-		return target{user: &tg.User{ID: ctx.SelfID, Self: true}}, nil
+	case sub == "help" || sub == "h":
+		return c.Edit(helpText(tl))
+	case sub == "batch":
+		return p.handleBatch(c, args[1:])
+	case sub == "history":
+		history, cacheCount, cacheHours := p.store.snapshot()
+		return c.Edit(renderHistory(tl, history, cacheCount, cacheHours))
+	case sub == "clear":
+		return p.handleClear(c)
 	}
-	return target{}, errors.New(tl(
-		"无效参数：用 @用户名、数字 ID，或回复对方的消息",
-		"Invalid argument: use @username, a numeric ID, or reply to their message"))
-}
 
-// resolveReply inspects the replied message sender.
-func (p *WhoisPlugin) resolveReply(ctx *plugin.CommandContext) (target, error) {
-	tl := ctx.Tlocal
-	peer, err := ctx.ResolvePeer()
+	domain := ""
+	// A replied message's first domain wins, like the source.
+	if c.Message.IsReply {
+		if r, err := c.ReplyMessage(); err == nil && r != nil {
+			domain = extractDomain(r.Message)
+		} else if err != nil && c.Logger != nil {
+			c.Logger.Warn("whois: fetch replied message failed", "error", err)
+		}
+	}
+	if domain == "" && sub != "" {
+		domain = cleanDomain(sub)
+	}
+	if domain == "" {
+		return c.Edit(helpText(tl))
+	}
+	if !validDomain(domain) {
+		return c.Edit("❌ " + tl("域名格式无效", "Invalid domain format") + "\n\n" +
+			tl("输入的域名：", "Domain entered: ") + plugin.Code(domain) + "\n\n" +
+			"💡 " + tl("请输入有效的域名，例如：", "Please enter a valid domain, e.g.:") + "\n" +
+			"• example.com\n• google.com\n• github.io")
+	}
+
+	// Cache first, then a live query.
+	if rec, ok := p.store.cached(domain); ok {
+		return c.Edit(renderResult(tl, rec, true))
+	}
+	_ = c.Edit("🔍 " + tl("正在查询域名信息…", "Querying domain info…") + "\n\n" +
+		tl("域名：", "Domain: ") + plugin.Code(domain))
+
+	rec, err := p.query(c.Context(), domain)
 	if err != nil {
-		return target{}, err
+		return c.Edit(renderQueryError(tl, domain, err))
 	}
-	msgs, _, _, err := plugin.GetMessages(ctx.Context(), ctx.API, peer, realReplyID(ctx.Message.Message))
-	if err != nil || len(msgs) == 0 {
-		return target{}, errors.New(tl("读不到被回复的消息", "Cannot read the replied message"))
+	if err := p.store.save(rec); err != nil && c.Logger != nil {
+		c.Logger.Warn("whois: persist record failed", "error", err)
 	}
-	m := msgs[0]
-	switch f := m.FromID.(type) {
-	case *tg.PeerUser:
-		if f.UserID == ctx.SelfID {
-			return target{user: &tg.User{ID: ctx.SelfID, Self: true}}, nil
-		}
-		return p.resolveID(ctx, f.UserID)
-	case *tg.PeerChannel:
-		return p.resolveID(ctx, plugin.ChannelChatID(f.ChannelID))
-	case *tg.PeerChat:
-		return target{peer: &tg.InputPeerChat{ChatID: f.ChatID}}, nil
-	}
-	// No FromID: an anonymous admin speaking as the group itself.
-	if _, isChannel := peer.(*tg.InputPeerChannel); isChannel {
-		return target{peer: peer}, nil
-	}
-	return target{}, errors.New(tl(
-		"被回复的消息是匿名管理员或频道身份发的，无法查到用户",
-		"The replied message came from an anonymous admin or channel identity"))
+	return c.Edit(renderResult(tl, rec, false))
 }
 
-// resolveID turns a chat-id-form id into a user or chat target.
-func (p *WhoisPlugin) resolveID(ctx *plugin.CommandContext, id int64) (target, error) {
-	tl := ctx.Tlocal
-	if id > 0 {
-		if id == ctx.SelfID {
-			return target{user: &tg.User{ID: ctx.SelfID, Self: true}}, nil
-		}
-		peer, err := ctx.PeerResolver.ResolveFromChatID(ctx.Context(), id)
-		if err != nil {
-			return target{}, errors.New(tl(
-				"找不到这个用户，换成 @用户名 或回复对方的消息试试",
-				"Unknown user; try @username or reply to their message"))
-		}
-		if user, ok := peerUser(peer); ok {
-			return target{user: user}, nil
-		}
-		return target{peer: peer}, nil
-	}
-	peer, err := ctx.PeerResolver.ResolveFromChatID(ctx.Context(), id)
+// query runs one live lookup, mapping transport failures to the source's
+// error branches.
+func (p *WhoisPlugin) query(ctx context.Context, domain string) (WhoisRecord, error) {
+	whois, err := fetchWhoisCheck(ctx, p.timeout(), domain)
 	if err != nil {
-		return target{}, errors.New(tl(
-			"找不到这个群组，换成 @用户名 或在群内使用试试",
-			"Unknown chat; try @username or run this inside that chat"))
+		return WhoisRecord{}, err
 	}
-	return target{peer: peer}, nil
+	if whois == "" {
+		return WhoisRecord{}, errNoWhois{}
+	}
+	return buildRecord(domain, cutRawData(whois)), nil
 }
 
-// peerUser converts a resolver answer to a *tg.User when it is one.
-func peerUser(peer tg.InputPeerClass) (*tg.User, bool) {
-	switch v := peer.(type) {
-	case *tg.InputPeerSelf:
-		return &tg.User{ID: 0, Self: true}, true
-	case *tg.InputPeerUser:
-		return &tg.User{ID: v.UserID, AccessHash: v.AccessHash}, true
-	case *tg.InputPeerUserFromMessage:
-		return &tg.User{ID: v.UserID}, true
+// errNoWhois marks a 200 answer without whois data.
+type errNoWhois struct{}
+
+func (errNoWhois) Error() string { return "no whois data" }
+
+// renderQueryError renders the source's failure card: lookup failure,
+// timeout, rate limit, denied, other HTTP, or transport.
+func renderQueryError(tl func(zh, en string) string, domain string, err error) string {
+	var b strings.Builder
+	if _, ok := err.(errNoWhois); ok {
+		b.WriteString("❌ " + tl("查询失败", "Lookup failed") + "\n\n" +
+			tl("域名：", "Domain: ") + plugin.Code(domain) + "\n\n" +
+			"💡 " + tl("可能的原因：", "Possible reasons:") + "\n" +
+			"• " + tl("域名不存在或未注册", "Domain does not exist or is unregistered") + "\n" +
+			"• " + tl("域名格式不正确", "Malformed domain") + "\n" +
+			"• " + tl("WHOIS 信息不可用", "WHOIS data unavailable") + "\n\n" +
+			"📖 " + tl("请检查域名拼写是否正确", "Please check the domain spelling"))
+		return b.String()
 	}
-	return nil, false
+	b.WriteString("❌ " + tl("查询失败", "Lookup failed") + "\n\n" +
+		tl("域名：", "Domain: ") + plugin.Code(domain) + "\n\n")
+	var he *httpStatusError
+	switch {
+	case isTimeoutErr(err):
+		b.WriteString(tl("错误：请求超时", "Error: request timed out") + "\n\n💡 " + tl("请检查网络连接后重试", "Check the network and retry"))
+	case asHTTPStatus(err, &he) && he.code == 429:
+		b.WriteString(tl("错误：请求过于频繁", "Error: too many requests") + "\n\n💡 " + tl("请稍后再试", "Try again later"))
+	case asHTTPStatus(err, &he) && he.code == 403:
+		b.WriteString(tl("错误：API 访问被拒绝", "Error: API access denied") + "\n\n💡 " + tl("可能需要更换 API 服务", "The API service may need replacing"))
+	case asHTTPStatus(err, &he):
+		fmt.Fprintf(&b, "%s %d\n%s %s\n\n💡 %s",
+			tl("错误代码：", "Error code:"), he.code,
+			tl("错误信息：", "Error message:"), plugin.Escape(err.Error()),
+			tl("请稍后重试", "Try again later"))
+	default:
+		msg := err.Error()
+		if msg == "" {
+			msg = tl("未知错误", "unknown error")
+		}
+		b.WriteString(tl("错误信息：", "Error message: ") + plugin.Escape(msg) + "\n\n💡 " + tl("请检查网络连接后重试", "Check the network and retry"))
+	}
+	return b.String()
 }
 
-// isNumeric reports whether s is an optionally signed integer.
-func isNumeric(s string) bool {
-	if s == "" {
-		return false
+// asHTTPStatus extracts an *httpStatusError from err.
+func asHTTPStatus(err error, target **httpStatusError) bool {
+	if he, ok := err.(*httpStatusError); ok {
+		*target = he
+		return true
 	}
-	body := strings.TrimLeft(s, "+-")
-	if body == "" {
-		return false
+	return false
+}
+
+// handleBatch runs the bounded batch loop with progress edits and a
+// success/failure tally, caching each result.
+func (p *WhoisPlugin) handleBatch(c *plugin.CommandContext, domains []string) error {
+	tl := c.Tlocal
+	if len(domains) == 0 {
+		return c.Edit("❌ " + tl("请提供要查询的域名", "Provide domains to query") + "\n\n💡 " +
+			tl("使用示例：", "Example:") + " " + plugin.Code("whois batch google.com github.com"))
 	}
-	for _, r := range body {
-		if r < '0' || r > '9' {
-			return false
+	if len(domains) > maxBatch {
+		return c.Edit("❌ " + tl("批量查询限制", "Batch query limit") + "\n\n" +
+			fmt.Sprintf(tl("每次最多查询 %d 个域名，您提供了 %d 个", "At most %d domains per batch, you gave %d"), maxBatch, len(domains)))
+	}
+	_ = c.Edit("🔍 " + tl("批量查询中…", "Batch query in progress…") + "\n\n" +
+		fmt.Sprintf(tl("域名数量：%d", "Domains: %d"), len(domains)))
+
+	var lines []batchLine
+	success, fail := 0, 0
+	for i, raw := range domains {
+		domain := cleanDomain(raw)
+		_ = c.Edit("🔍 " + tl("批量查询中…", "Batch query in progress…") + "\n" +
+			fmt.Sprintf(tl("进度：%d/%d", "Progress: %d/%d"), i+1, len(domains)) + "\n" +
+			tl("当前域名：", "Current: ") + plugin.Code(domain))
+		if _, ok := p.store.cached(domain); ok {
+			lines = append(lines, batchLine{domain: domain, ok: true, cached: true})
+			success++
+			continue
+		}
+		if _, err := p.query(c.Context(), domain); err != nil {
+			lines = append(lines, batchLine{domain: domain})
+			fail++
+		} else {
+			lines = append(lines, batchLine{domain: domain, ok: true})
+			success++
+		}
+		if i < len(domains)-1 {
+			select {
+			case <-time.After(batchGap):
+			case <-c.Context().Done():
+				return c.Edit(renderBatchDone(tl, lines, success, fail))
+			}
 		}
 	}
-	return true
+	return c.Edit(renderBatchDone(tl, lines, success, fail))
 }
 
-// parseID converts a numeric argument to a chat-id-form id.
-func parseID(s string) (int64, bool) {
-	var id int64
-	if _, err := fmt.Sscanf(strings.TrimSpace(s), "%d", &id); err != nil {
-		return 0, false
+// handleClear wipes history and cache.
+func (p *WhoisPlugin) handleClear(c *plugin.CommandContext) error {
+	tl := c.Tlocal
+	historyCount, cacheCount, err := p.store.clear()
+	if err != nil {
+		return c.Edit("❌ " + tl("清除失败", "Clear failed") + ": " + plugin.Escape(err.Error()))
 	}
-	return id, true
+	if historyCount == 0 && cacheCount == 0 {
+		return c.Edit(renderEmptyClear(tl))
+	}
+	return c.Edit(renderCleared(tl, historyCount, cacheCount))
 }
 
-// realReplyID returns the replied message id, ignoring the implicit
-// reply-to-topic-root header every forum topic message carries.
-func realReplyID(msg *tg.Message) int {
-	h, ok := msg.ReplyTo.(*tg.MessageReplyHeader)
-	if !ok || h.ReplyToMsgID == 0 {
-		return 0
-	}
-	if h.ForumTopic {
-		if _, has := h.GetReplyToTopID(); !has {
-			return 0
-		}
-	}
-	return h.ReplyToMsgID
+// helpText renders the usage card (the source's promised expiry reminder
+// never existed in code, so it is not advertised).
+func helpText(tl func(zh, en string) string) string {
+	return tl(
+		"🔍 **WHOIS 域名查询**\n\n"+
+			"**功能**\n"+
+			"• 查询域名注册信息和状态\n"+
+			"• 显示注册/过期/更新日期\n"+
+			"• 查看DNS服务器和注册商\n"+
+			"• 批量查询多个域名\n"+
+			"• 查询历史记录缓存\n"+
+			"• 域名到期分级提示\n\n"+
+			"**用法**\n"+
+			plugin.Code("whois <域名>")+" 查询指定域名\n"+
+			plugin.Code("whois")+" 回复包含域名的消息\n"+
+			plugin.Code("whois batch <域名1> <域名2>...")+" 批量查询（最多 10 个）\n"+
+			plugin.Code("whois history")+" 查看查询历史\n"+
+			plugin.Code("whois clear")+" 清除历史记录\n\n"+
+			"**示例**\n"+
+			plugin.Code("whois google.com")+"\n"+
+			plugin.Code("whois batch google.com github.com")+"\n\n"+
+			"**说明**\n"+
+			"• 支持自动提取 URL 中的域名\n"+
+			"• 查询结果自动缓存 24 小时",
+		"🔍 **WHOIS Domain Lookup**\n\n"+
+			"**Features**\n"+
+			"• Domain registration info and status\n"+
+			"• Created/expiry/updated dates\n"+
+			"• Name servers and registrar\n"+
+			"• Batch lookups\n"+
+			"• History with cache\n"+
+			"• Expiry grading\n\n"+
+			"**Usage**\n"+
+			plugin.Code("whois <domain>")+" look up a domain\n"+
+			plugin.Code("whois")+" reply to a message containing a domain\n"+
+			plugin.Code("whois batch <d1> <d2>...")+" batch lookup (max 10)\n"+
+			plugin.Code("whois history")+" show query history\n"+
+			plugin.Code("whois clear")+" clear history\n\n"+
+			"**Examples**\n"+
+			plugin.Code("whois google.com")+"\n"+
+			plugin.Code("whois batch google.com github.com")+"\n\n"+
+			"**Notes**\n"+
+			"• Extracts domains from URLs automatically\n"+
+			"• Results cached for 24 hours")
 }
