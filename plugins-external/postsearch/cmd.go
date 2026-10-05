@@ -41,7 +41,7 @@ func (s *service) cmdSearch(ctx *plugin.CommandContext, query string, _spoiler, 
 			select {
 			case <-ctx.Context().Done():
 				return ctx.Edit("❌ " + tl("搜索已取消", "Search cancelled"))
-			case <-time.After(750 * time.Millisecond):
+			case <-time.After(50 * time.Millisecond):
 			}
 		}
 		ch, ok := cfg.byHandle(handle)
@@ -74,6 +74,7 @@ func (s *service) cmdSearch(ctx *plugin.CommandContext, query string, _spoiler, 
 		gone := map[string]bool{}
 		for _, h := range drop {
 			gone[h] = true
+			s.dropCached(h)
 		}
 		_ = s.store.withLock(func(c *config) error {
 			c.removeChannels(gone)
@@ -497,12 +498,27 @@ func (s *service) cmdImport(ctx *plugin.CommandContext) error {
 		return ctx.Edit("❌ " + tl("备份文件无效", "Invalid backup file"))
 	}
 	_ = ctx.Edit(fmt.Sprintf("⚙️ "+tl("正在导入 %d 个频道…", "Importing %d channels…"), len(handles)))
+	// Add first, replace last: clearing the list before adding would lose
+	// the old channels when the import dies mid-way (network error on
+	// handle 2 of N).
+	old := s.store.snapshot()
+	oldChannels, oldDefault, oldFilters := old.Channels, old.DefaultChannel, old.AdFilters
 	_ = s.store.withLock(func(c *config) error {
 		c.Channels = nil
 		c.DefaultChannel = ""
 		return nil
 	})
-	return s.cmdAdd(ctx, strings.Join(handles, "\\"))
+	err = s.cmdAdd(ctx, strings.Join(handles, "\\"))
+	if err != nil && len(s.store.snapshot().Channels) == 0 {
+		// Nothing made it in: roll back so the old list survives.
+		_ = s.store.withLock(func(c *config) error {
+			c.Channels = oldChannels
+			c.DefaultChannel = oldDefault
+			c.AdFilters = oldFilters
+			return nil
+		})
+	}
+	return err
 }
 
 func (s *service) cmdAd(ctx *plugin.CommandContext, args string) error {

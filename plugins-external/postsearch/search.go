@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gotd/td/tg"
@@ -41,6 +43,55 @@ type hit struct {
 type service struct {
 	store *store
 	host  plugin.Host
+
+	// peerCache caches handle → resolved chat info, so a search over many
+	// channels does not re-run contacts.resolve + getChannels (2 API calls
+	// each) on every command.
+	mu        sync.Mutex
+	peerCache map[string]peerCacheEntry
+}
+
+// peerTTL bounds how long a cached resolve/lookup is trusted.
+const peerTTL = 6 * time.Hour
+
+type peerCacheEntry struct {
+	peer tg.InputPeerClass
+	info chatInfo
+	at   time.Time
+}
+
+// resolveCached resolves a handle and reads its chat info, using the
+// service cache; ok=false means the caller should resolve the hard way.
+// Errors are not cached.
+func (s *service) resolveCached(ctx context.Context, handle string) (tg.InputPeerClass, chatInfo, bool) {
+	s.mu.Lock()
+	e, ok := s.peerCache[handle]
+	s.mu.Unlock()
+	if ok && time.Since(e.at) < peerTTL {
+		return e.peer, e.info, true
+	}
+	peer, err := s.resolve(ctx, handle)
+	if err != nil {
+		return nil, chatInfo{}, false
+	}
+	info, err := s.lookup(ctx, peer)
+	if err != nil {
+		return nil, chatInfo{}, false
+	}
+	if s.peerCache == nil {
+		s.peerCache = map[string]peerCacheEntry{}
+	}
+	s.mu.Lock()
+	s.peerCache[handle] = peerCacheEntry{peer: peer, info: info, at: time.Now()}
+	s.mu.Unlock()
+	return peer, info, true
+}
+
+// dropCached forgets a handle's cached peer, e.g. after it went away.
+func (s *service) dropCached(handle string) {
+	s.mu.Lock()
+	delete(s.peerCache, handle)
+	s.mu.Unlock()
 }
 
 func newService(host plugin.Host) *service {
@@ -90,9 +141,11 @@ func parseTME(s string) (string, bool) {
 }
 
 // parseChatID accepts -100…, bare channel ids and bare basic-group ids.
+// The whole token must be a number: Sscanf("%d") would happily read the
+// "123" out of "123abc" and turn a mistyped handle into PEER_ID_INVALID.
 func parseChatID(s string) (int64, error) {
-	var id int64
-	if _, err := fmt.Sscanf(s, "%d", &id); err != nil {
+	id, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
 		return 0, err
 	}
 	return id, nil
@@ -210,6 +263,26 @@ func (s *service) searchOnce(ctx context.Context, req *tg.MessagesSearchRequest)
 			continue
 		}
 		return res, err
+	}
+}
+
+// getReplies fetches a post's comments with the same flood-wait retry as
+// searchOnce, so a rate-limited multi-post crawl does not silently drop
+// results.
+func (s *service) getReplies(ctx context.Context, peer tg.InputPeerClass, msgID int) (tg.MessagesMessagesClass, error) {
+	for attempt := 0; ; attempt++ {
+		res, err := s.api().MessagesGetReplies(ctx, &tg.MessagesGetRepliesRequest{
+			Peer: peer, MsgID: msgID, Limit: 100,
+		})
+		d, ok := tgerr.AsFloodWait(err)
+		if !ok || attempt >= 2 || d > 30*time.Second {
+			return res, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(d + time.Second):
+		}
 	}
 }
 
@@ -406,13 +479,9 @@ func durationOf(m *tg.Message) int {
 // searchChannel runs one channel's keyword search, expanding albums so a
 // media group counts once, like the source.
 func (s *service) searchChannel(ctx context.Context, ch channel, query string, filters []string) ([]hit, error) {
-	peer, err := s.resolve(ctx, ch.Handle)
-	if err != nil {
-		return nil, err
-	}
-	info, err := s.lookup(ctx, peer)
-	if err != nil {
-		return nil, err
+	peer, info, ok := s.resolveCached(ctx, ch.Handle)
+	if !ok {
+		return nil, fmt.Errorf("cannot resolve %s", ch.Handle)
 	}
 	req := &tg.MessagesSearchRequest{
 		Peer:   peer,
@@ -453,13 +522,9 @@ func (s *service) searchChannel(ctx context.Context, ch channel, query string, f
 
 // randomChannel runs the kkp search: recent video posts, 20–180s long.
 func (s *service) randomChannel(ctx context.Context, ch channel, filters []string) ([]hit, error) {
-	peer, err := s.resolve(ctx, ch.Handle)
-	if err != nil {
-		return nil, err
-	}
-	info, err := s.lookup(ctx, peer)
-	if err != nil {
-		return nil, err
+	peer, info, ok := s.resolveCached(ctx, ch.Handle)
+	if !ok {
+		return nil, fmt.Errorf("cannot resolve %s", ch.Handle)
 	}
 	limit := kkpFetch
 	if info.Megagroup {
@@ -495,13 +560,9 @@ func (s *service) searchLinked(ctx context.Context, ch channel, query string, fi
 	if ch.LinkedGroup == "" {
 		return nil, nil
 	}
-	peer, err := s.resolve(ctx, ch.LinkedGroup)
-	if err != nil {
-		return nil, err
-	}
-	info, err := s.lookup(ctx, peer)
-	if err != nil {
-		return nil, err
+	peer, info, ok := s.resolveCached(ctx, ch.LinkedGroup)
+	if !ok {
+		return nil, fmt.Errorf("cannot resolve %s", ch.LinkedGroup)
 	}
 	// find matching posts with replies
 	res, err := s.searchOnce(ctx, &tg.MessagesSearchRequest{
@@ -520,9 +581,7 @@ func (s *service) searchLinked(ctx context.Context, ch channel, query string, fi
 		if !ok || reps.Replies == 0 {
 			continue
 		}
-		comments, err := s.api().MessagesGetReplies(ctx, &tg.MessagesGetRepliesRequest{
-			Peer: peer, MsgID: m.ID, Limit: 100,
-		})
+		comments, err := s.getReplies(ctx, peer, m.ID)
 		if err != nil {
 			continue
 		}

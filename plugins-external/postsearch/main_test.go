@@ -172,6 +172,21 @@ func TestChatRefLink(t *testing.T) {
 	}
 }
 
+// parseChatID must reject tokens that merely start with a number:
+// Sscanf("123abc") used to succeed with 123 and resolve a garbage peer.
+func TestParseChatID(t *testing.T) {
+	for _, s := range []string{"-1001234567890", "-1234", "1234"} {
+		if _, err := parseChatID(s); err != nil {
+			t.Errorf("parseChatID(%q) = %v, want ok", s, err)
+		}
+	}
+	for _, s := range []string{"123abc", "abc", "", "12 34", "-100x", "1.5"} {
+		if _, err := parseChatID(s); err == nil {
+			t.Errorf("parseChatID(%q) accepted garbage", s)
+		}
+	}
+}
+
 func TestParseTME(t *testing.T) {
 	cases := map[string]string{
 		"https://t.me/durov":        "durov",
