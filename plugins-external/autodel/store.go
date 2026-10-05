@@ -170,3 +170,37 @@ func (p *AutoDelPlugin) savePendingLocked() error {
 		Pending []PendingDel `json:"pending"`
 	}{p.pending})
 }
+
+// markPendingDirtyLocked flags pending.json as changed and schedules a
+// debounced write, so bursts of schedules/removals coalesce into one disk
+// write. Callers must hold p.mu.
+func (p *AutoDelPlugin) markPendingDirtyLocked() {
+	p.pendingDirty = true
+	if p.pendingSaveTimer != nil {
+		return // a write is already scheduled
+	}
+	p.pendingSaveTimer = time.AfterFunc(pendingSaveDelay, p.flushPending)
+}
+
+// flushPending writes pending.json if dirty. Safe to call without p.mu.
+func (p *AutoDelPlugin) flushPending() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.pendingSaveTimer = nil
+	if !p.pendingDirty {
+		return
+	}
+	if err := p.savePendingLocked(); err != nil && p.log != nil {
+		p.log.Warn("autodel: save pending failed", "error", err)
+	}
+	p.pendingDirty = false
+}
+
+// stopPendingTimerLocked cancels a pending debounce timer (no-op if none).
+// Callers must hold p.mu.
+func (p *AutoDelPlugin) stopPendingTimerLocked() {
+	if p.pendingSaveTimer != nil {
+		p.pendingSaveTimer.Stop()
+		p.pendingSaveTimer = nil
+	}
+}

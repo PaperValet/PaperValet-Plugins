@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/TiaraBasori/PaperValet/pkg/plugin"
 )
@@ -29,6 +30,9 @@ type AutoDelPlugin struct {
 	ttl     map[string]int // chat id → seconds; "0" = global
 	rules   []CmdRule
 	pending []PendingDel
+
+	pendingDirty     bool        // pending.json needs a (debounced) write
+	pendingSaveTimer *time.Timer // debounces pending.json writes
 
 	host plugin.Host
 	mgr  plugin.Manager
@@ -114,18 +118,44 @@ func (p *AutoDelPlugin) Start(_ context.Context) error {
 	return nil
 }
 
-func (p *AutoDelPlugin) Stop(_ context.Context) error {
+func (p *AutoDelPlugin) Stop(ctx context.Context) error {
 	p.mu.Lock()
 	stop, cancel := p.stopListen, p.cancel
 	p.stopListen, p.cancel, p.ctx = nil, nil, nil
+	p.stopPendingTimerLocked()
+	if p.pendingDirty {
+		if err := p.savePendingLocked(); err != nil && p.log != nil {
+			p.log.Warn("autodel: final pending save failed", "error", err)
+		}
+		p.pendingDirty = false
+	}
 	p.mu.Unlock()
 	if stop != nil {
 		stop()
 	}
 	if cancel != nil {
-		cancel()
+		cancel() // deleteNow workers see this and abort network calls
 	}
-	p.wg.Wait()
+	// Bounded wait: a stuck delete must not block unload forever. The
+	// caller's ctx bounds the wait too (whichever ends first).
+	waitParent := ctx
+	if waitParent == nil {
+		waitParent = context.Background()
+	}
+	waitCtx, waitCancel := context.WithTimeout(waitParent, stopWait)
+	defer waitCancel()
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-waitCtx.Done():
+		if p.log != nil {
+			p.log.Warn("autodel: Stop timed out waiting for workers")
+		}
+	}
 	return nil
 }
 

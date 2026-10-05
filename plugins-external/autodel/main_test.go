@@ -7,6 +7,10 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/gotd/td/tg"
+
+	"github.com/TiaraBasori/PaperValet/pkg/plugin"
 )
 
 func TestParseDuration(t *testing.T) {
@@ -238,5 +242,116 @@ func TestDefaultRulesNoDupes(t *testing.T) {
 		if _, err := strconv.Atoi(r.ID); err != nil {
 			t.Errorf("non-numeric id: %+v", r)
 		}
+	}
+}
+
+func TestPickResponses(t *testing.T) {
+	const self = int64(100)
+	// newest-first like getHistory; command id 25, window (25, 33].
+	stubs := []respMsg{
+		{ID: 34, From: self, Out: true}, // own but beyond window
+		{ID: 30, From: self, Out: true}, // own, in window
+		{ID: 29, From: 999, Out: false}, // someone else, in window
+		{ID: 28, From: self, Out: true}, // own, in window
+		{ID: 27, From: 0, Out: false},   // anonymous, in window, not own
+		{ID: 26, From: 999, Out: true},  // own via Out flag
+		{ID: 20, From: self, Out: true}, // own but before the command
+	}
+	got := pickResponses(stubs, self, false, 25)
+	// 26 (Out), 28, 30 own; 34 out of window; 27/29 not own; cap is 3
+	if len(got) != 3 || got[0] != 26 || got[1] != 28 || got[2] != 30 {
+		t.Fatalf("pickResponses = %v, want [26 28 30]", got)
+	}
+	// nothing after the command → nothing deleted
+	if got := pickResponses(stubs, self, false, 34); got != nil {
+		t.Fatalf("pickResponses beyond window = %v, want nil", got)
+	}
+	// Saved Messages: every message in the window counts (no ownership check)
+	saved := pickResponses([]respMsg{{ID: 40}, {ID: 38}, {ID: 37}, {ID: 36}, {ID: 30}}, self, true, 35)
+	if len(saved) != 3 || saved[0] != 36 || saved[1] != 37 || saved[2] != 38 {
+		t.Fatalf("saved pickResponses = %v, want [36 37 38]", saved)
+	}
+}
+
+func TestSelectResponsesFromRawMessages(t *testing.T) {
+	const self = int64(100)
+	raw := []tg.MessageClass{
+		&tg.MessageService{Action: &tg.MessageActionEmpty{}}, // skipped
+		&tg.Message{ID: 11, Out: true, FromID: &tg.PeerUser{UserID: self}},
+		&tg.Message{ID: 12, FromID: &tg.PeerUser{UserID: 999}},
+		&tg.Message{ID: 10, Out: true}, // before the command
+	}
+	got := selectResponses(raw, self, false, 10)
+	if len(got) != 1 || got[0] != 11 {
+		t.Fatalf("selectResponses = %v, want [11]", got)
+	}
+}
+
+func TestOnMessageMediaGetsTTL(t *testing.T) {
+	dir := t.TempDir()
+	p := &AutoDelPlugin{dir: dir, ttl: map[string]int{"777": 3600}, host: fakeHost{}}
+	p.ctx, p.cancel = context.WithCancel(context.Background())
+	// empty text (sticker/photo) own message must still schedule a deletion
+	ev := &plugin.MessageEvent{Message: &tg.Message{ID: 42}, ChatID: 777, IsOut: true}
+	p.onMessage(context.Background(), ev, false)
+	p.mu.Lock()
+	n, dirty := len(p.pending), p.pendingDirty
+	p.mu.Unlock()
+	p.cancel()
+	if n != 1 || !dirty {
+		t.Fatalf("pure-media message not scheduled: pending=%d dirty=%v", n, dirty)
+	}
+}
+
+// fakeHost implements only what the listener path touches.
+type fakeHost struct {
+	plugin.Host // nil for everything not overridden
+}
+
+func (fakeHost) SelfID() int64      { return 100 }
+func (fakeHost) Prefixes() []string { return []string{"."} }
+
+func TestPendingDebounce(t *testing.T) {
+	dir := t.TempDir()
+	p := &AutoDelPlugin{dir: dir, ttl: map[string]int{}}
+	p.ctx, p.cancel = context.WithCancel(context.Background())
+	defer p.cancel()
+
+	p.mu.Lock()
+	p.pending = append(p.pending, PendingDel{CID: 1, MID: 1, At: 1})
+	p.markPendingDirtyLocked()
+	p.stopPendingTimerLocked() // simulate the debounce window elapsing now
+	p.mu.Unlock()
+
+	// dirty state alone must not hit the disk
+	if back, _ := loadPending(filepath.Join(dir, pendingFile)); len(back) != 0 {
+		t.Fatalf("pending written before debounce flush: %+v", back)
+	}
+	p.flushPending()
+	back, err := loadPending(filepath.Join(dir, pendingFile))
+	if err != nil || len(back) != 1 || back[0].CID != 1 || back[0].MID != 1 {
+		t.Fatalf("pending not written after flush: %+v %v", back, err)
+	}
+}
+
+func TestStopFlushesDirtyPending(t *testing.T) {
+	dir := t.TempDir()
+	p := &AutoDelPlugin{dir: dir, ttl: map[string]int{}}
+	p.ctx, p.cancel = context.WithCancel(context.Background())
+
+	p.mu.Lock()
+	p.pending = []PendingDel{{CID: 5, MID: 6, At: time.Now().Add(time.Hour).Unix()}}
+	p.markPendingDirtyLocked()
+	p.mu.Unlock()
+
+	if err := p.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	back, err := loadPending(filepath.Join(dir, pendingFile))
+	if err != nil || len(back) != 1 || back[0].CID != 5 || back[0].MID != 6 {
+		t.Fatalf("Stop did not flush dirty pending: %+v %v", back, err)
+	}
+	if p.pendingDirty {
+		t.Fatal("dirty flag not cleared by Stop")
 	}
 }

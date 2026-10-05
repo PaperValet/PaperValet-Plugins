@@ -12,18 +12,23 @@ import (
 )
 
 const (
-	pendingMaxAge  = 24 * time.Hour
-	restartRetry   = 10 * time.Second // retry delay for restored deletions
-	deleteTimeout  = 30 * time.Second
-	historyLimit   = 100 // messages scanned when deleting responses
-	maxResponses   = 3   // responses deleted alongside a -r rule
-	historyTimeout = 30 * time.Second
+	pendingMaxAge    = 24 * time.Hour
+	restartRetry     = 10 * time.Second // retry delay for restored deletions
+	deleteTimeout    = 30 * time.Second
+	historyLimit     = 100 // messages scanned when deleting responses
+	maxResponses     = 3   // responses deleted alongside a -r rule
+	responseWindow   = 8   // ids above the command still counted as its responses
+	historyTimeout   = 30 * time.Second
+	pendingSaveDelay = 2 * time.Second  // debounce window for pending.json writes
+	stopWait         = 10 * time.Second // bound for Stop's worker wait
 )
 
 // onMessage runs on the update path: it only classifies the message and
 // schedules deletions in goroutines.
 func (p *AutoDelPlugin) onMessage(_ context.Context, ev *plugin.MessageEvent, edited bool) {
-	if edited || ev == nil || ev.Message == nil || ev.Text == "" {
+	// No text check here: pure-media own messages (stickers, photos, voice)
+	// must still get their TTL deletion.
+	if edited || ev == nil || ev.Message == nil {
 		return
 	}
 	if !ev.IsOut && ev.ChatID != p.host.SelfID() {
@@ -102,8 +107,8 @@ func (p *AutoDelPlugin) resolveAlias(cmd string) string {
 	return f[0]
 }
 
-// schedule persists the deletion then deletes after d (finding response
-// messages too when resp is set).
+// schedule records the deletion in memory (debounced to disk) and deletes
+// after d (finding response messages too when resp is set).
 func (p *AutoDelPlugin) schedule(chatID int64, msgID int, d time.Duration, resp bool) {
 	p.mu.Lock()
 	if p.cancel == nil {
@@ -117,12 +122,9 @@ func (p *AutoDelPlugin) schedule(chatID int64, msgID int, d time.Duration, resp 
 		}
 	}
 	p.pending = append(p.pending, PendingDel{CID: chatID, MID: msgID, At: time.Now().Add(d).Unix(), Resp: resp})
-	err := p.savePendingLocked()
+	p.markPendingDirtyLocked()
 	ctx := p.ctx
 	p.mu.Unlock()
-	if err != nil && p.log != nil {
-		p.log.Warn("autodel: persist pending failed", "error", err)
-	}
 
 	p.wg.Add(1)
 	go func() {
@@ -134,7 +136,7 @@ func (p *AutoDelPlugin) schedule(chatID int64, msgID int, d time.Duration, resp 
 			return
 		case <-t.C:
 		}
-		p.deleteNow(context.Background(), chatID, msgID, resp)
+		p.deleteNow(ctx, chatID, msgID, resp)
 	}()
 }
 
@@ -178,25 +180,48 @@ func (p *AutoDelPlugin) findResponses(ctx context.Context, api *tg.Client, peer 
 	if !ok {
 		return nil
 	}
-	saved := chatID == p.host.SelfID()
-	selfID := p.host.SelfID()
-	var out []int
-	for _, m := range mod.GetMessages() {
+	return selectResponses(mod.GetMessages(), p.host.SelfID(), chatID == p.host.SelfID(), cmdID)
+}
+
+// respMsg is the minimal message shape pickResponses needs.
+type respMsg struct {
+	ID   int
+	From int64 // sender user id, 0 for unknown
+	Out  bool  // sent by the logged-in account
+}
+
+// selectResponses converts raw history messages to stubs and picks the
+// command's responses (newest-first input, like getHistory).
+func selectResponses(msgs []tg.MessageClass, self int64, saved bool, cmdID int) []int {
+	var stubs []respMsg
+	for _, m := range msgs {
 		msg, ok := m.(*tg.Message)
-		if !ok || msg.ID == cmdID {
+		if !ok {
 			continue
+		}
+		stubs = append(stubs, respMsg{ID: msg.ID, From: plugin.SenderID(msg), Out: msg.Out})
+	}
+	return pickResponses(stubs, self, saved, cmdID)
+}
+
+// pickResponses returns up to maxResponses of the account's own messages
+// that directly follow the command message cmdID. Only ids within
+// (cmdID, cmdID+responseWindow] are considered: anything the user wrote
+// later in the chat (or unrelated traffic) has an id outside that window
+// and is never deleted. In Saved Messages (saved) every message is the
+// account's own, so ownership is not checked there.
+func pickResponses(stubs []respMsg, self int64, saved bool, cmdID int) []int {
+	var out []int
+	for i := len(stubs) - 1; i >= 0; i-- { // oldest → newest
+		m := stubs[i]
+		if m.ID <= cmdID || m.ID > cmdID+responseWindow {
+			continue
+		}
+		if saved || m.Out || (self != 0 && m.From == self) {
+			out = append(out, m.ID)
 		}
 		if len(out) >= maxResponses {
 			break
-		}
-		if saved {
-			if msg.ID > cmdID {
-				out = append(out, msg.ID)
-			}
-			continue
-		}
-		if plugin.SenderID(msg) == selfID {
-			out = append(out, msg.ID)
 		}
 	}
 	return out
@@ -210,9 +235,7 @@ func (p *AutoDelPlugin) removePending(chatID int64, msgID int) {
 			break
 		}
 	}
-	if err := p.savePendingLocked(); err != nil && p.log != nil {
-		p.log.Warn("autodel: save pending failed", "error", err)
-	}
+	p.markPendingDirtyLocked()
 	p.mu.Unlock()
 }
 
@@ -244,7 +267,7 @@ func (p *AutoDelPlugin) restorePending() {
 				return
 			case <-t.C:
 			}
-			p.deleteNow(context.Background(), pd.CID, pd.MID, pd.Resp)
+			p.deleteNow(ctx, pd.CID, pd.MID, pd.Resp)
 		}(pd, d)
 	}
 }
