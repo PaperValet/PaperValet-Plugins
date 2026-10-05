@@ -1,16 +1,19 @@
 package main
 
-// quote — turn replied messages into a rendered quote image (TeleBox port).
+// quote — turn replied messages into a rendered quote image. Rendering uses
+// the official LyoSU/quote-api code (vendored by the TeleBox quote plugin)
+// executed locally through a node bridge; the Go side collects messages,
+// builds the JSON payload and sends the result. No remote quote service.
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
-	"image"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/TiaraBasori/PaperValet/pkg/plugin"
@@ -22,18 +25,16 @@ import (
 const maxQuoteMessages = 50
 
 type QuotePlugin struct {
-	host     plugin.Host
-	fontOnce sync.Once
-	fontErr  error
+	host plugin.Host
 }
 
 func New() *QuotePlugin { return &QuotePlugin{} }
 
 var Metadata = &plugin.PluginMetadata{
 	Name:        "quote",
-	Description: "回复消息生成引用图，本地纯 Go 渲染",
-	DescEN:      "Turn replied messages into a quote image, rendered locally in pure Go",
-	Version:     "1.0.0",
+	Description: "回复消息生成引用图（quote-api 官方渲染引擎）",
+	DescEN:      "Turn replied messages into a quote image, rendered by the official quote-api engine",
+	Version:     "2.0.0",
 	Author:      "PaperValet",
 	MinVersion:  "0.1.0",
 }
@@ -150,7 +151,8 @@ func helpText(ctx *plugin.CommandContext) string {
 			"• `quote crop` — 媒体按比例裁剪\n"+
 			"• `quote scale N` — 缩放 1–20（默认 2）\n"+
 			"• `quote bg #1b1429` / `bg #111/#222` / `bg random` — 背景\n\n"+
-			"组合示例：`quote r 3` · `quote stories #231d2b/#372e44`",
+			"组合示例：`quote r 3` · `quote stories #231d2b/#372e44`\n\n"+
+			"首次使用需联网下载渲染资源（较大，请耐心）。",
 		"💬 **Quote**\n\n"+
 			"• Reply with `quote` — render a quote sticker\n"+
 			"• `quote N` — quote N consecutive messages (max 50, negative goes back)\n"+
@@ -161,7 +163,8 @@ func helpText(ctx *plugin.CommandContext) string {
 			"• `quote crop` — crop media to ratio\n"+
 			"• `quote scale N` — scale 1–20 (default 2)\n"+
 			"• `quote bg #1b1429` / `bg #111/#222` / `bg random` — background\n\n"+
-			"Examples: `quote r 3` · `quote stories #231d2b/#372e44`")
+			"Examples: `quote r 3` · `quote stories #231d2b/#372e44`\n\n"+
+			"First use downloads rendering assets (large, be patient).")
 }
 
 // ---------------------------------------------------------------- handler
@@ -172,15 +175,15 @@ func (p *QuotePlugin) handleQuote(ctx *plugin.CommandContext) error {
 	}
 	args := parseArgs(ctx.RawArgs)
 
-	// resources
-	if err := p.loadFonts(); err != nil {
-		return ctx.Edit("❌ " + ctx.Tlocal("字体加载失败: ", "font load failed: ") + plugin.Escape(err.Error()))
+	if nodeRuntime() == "" {
+		return ctx.Edit("❌ " + ctx.Tlocal(
+			"未找到 node，quote 渲染需要 Node.js 运行时",
+			"node not found — quote rendering needs Node.js"))
 	}
-	emoji, _ := loadEmojiFont() // optional
 
 	isReply := ctx.Message != nil && ctx.Message.IsReply && ctx.Message.ReplyToID > 0
 
-	_ = ctx.Edit(ctx.Tlocal("⏳ 正在生成引用图…", "⏳ Rendering quote…"))
+	_ = ctx.Edit(ctx.Tlocal("⏳ 正在收集消息…", "⏳ Collecting messages…"))
 
 	msgs, err := p.collectMessages(ctx, args, isReply)
 	if err != nil {
@@ -190,18 +193,45 @@ func (p *QuotePlugin) handleQuote(ctx *plugin.CommandContext) error {
 		return ctx.Edit("❌ " + ctx.Tlocal("获取消息失败: ", "failed to load messages: ") + plugin.Escape(err.Error()))
 	}
 
-	rmsgs := p.buildRenderMsgs(ctx, msgs, args, emoji)
+	qmsgs := p.buildQuoteMessages(ctx, msgs, args)
 
-	opt := renderOptions{scale: args.scale, stories: args.stories, pngMode: args.png, media: args.media, crop: args.crop, emojiFont: emoji}
-	bg1, bg2, _ := backgroundColor(args.bg)
-	img := newRenderer(opt).renderQuoteImage(rmsgs, bg1, bg2)
-
-	// encode + send
-	pngPath, err := savePNG(img)
-	if err != nil {
-		return ctx.Edit("❌ " + ctx.Tlocal("编码失败: ", "encode failed: ") + plugin.Escape(err.Error()))
+	rawMsgs := make([]json.RawMessage, 0, len(qmsgs))
+	for _, qm := range qmsgs {
+		b, err := json.Marshal(qm)
+		if err != nil {
+			return ctx.Edit("❌ " + ctx.Tlocal("消息序列化失败: ", "message encode failed: ") + plugin.Escape(err.Error()))
+		}
+		rawMsgs = append(rawMsgs, b)
 	}
-	defer os.Remove(pngPath)
+
+	// type/format mirror the TeleBox source: quote→webp sticker, png→image,
+	// stories→720×1280 png.
+	outType := "quote"
+	if args.stories {
+		outType = "stories"
+	} else if args.png {
+		outType = "image"
+	}
+	outFormat := "png"
+	if outType == "quote" {
+		outFormat = "webp"
+	}
+
+	assetsDir, _ := p.host.DataDir("quote")
+	_ = ctx.Edit(ctx.Tlocal("⏳ 初始化 quote 资源（首次较慢）…", "⏳ Preparing quote assets (slow on first run)…"))
+
+	res, err := runBridge(ctx.Context(), p.host, &bridgeRequest{
+		Messages:        rawMsgs,
+		Type:            outType,
+		Format:          outFormat,
+		Scale:           args.scale,
+		BackgroundColor: args.bg,
+		EmojiBrand:      "apple",
+		AssetsDir:       assetsDir,
+	})
+	if err != nil {
+		return ctx.Edit("❌ " + ctx.Tlocal("渲染失败: ", "render failed: ") + plugin.Escape(err.Error()))
+	}
 
 	replyTo := 0
 	if isReply {
@@ -210,25 +240,22 @@ func (p *QuotePlugin) handleQuote(ctx *plugin.CommandContext) error {
 		replyTo = ctx.Message.Message.ID
 	}
 
-	if args.stories || args.png {
-		if err := p.sendPhoto(ctx, pngPath, replyTo); err != nil {
-			return ctx.Edit("❌ " + ctx.Tlocal("发送失败: ", "send failed: ") + plugin.Escape(err.Error()))
-		}
-	} else {
-		webpData, err := ffmpegWebp(ctx.Context(), mustReadFile(pngPath))
-		if err != nil {
-			// fallback: send as a photo when webp encoding is unavailable
-			if err := p.sendPhoto(ctx, pngPath, replyTo); err != nil {
-				return ctx.Edit("❌ " + ctx.Tlocal("发送失败: ", "send failed: ") + plugin.Escape(err.Error()))
-			}
-			return nil
-		}
-		webpPath, err := saveTemp(webpData, ".webp")
+	if res.Ext == "webp" {
+		webpPath, err := saveTemp(res.Data, ".webp")
 		if err != nil {
 			return ctx.Edit("❌ " + ctx.Tlocal("编码失败: ", "encode failed: ") + plugin.Escape(err.Error()))
 		}
 		defer os.Remove(webpPath)
 		if err := p.sendSticker(ctx, webpPath, replyTo); err != nil {
+			return ctx.Edit("❌ " + ctx.Tlocal("发送失败: ", "send failed: ") + plugin.Escape(err.Error()))
+		}
+	} else {
+		pngPath, err := saveTemp(res.Data, ".png")
+		if err != nil {
+			return ctx.Edit("❌ " + ctx.Tlocal("编码失败: ", "encode failed: ") + plugin.Escape(err.Error()))
+		}
+		defer os.Remove(pngPath)
+		if err := p.sendPhoto(ctx, pngPath, replyTo); err != nil {
 			return ctx.Edit("❌ " + ctx.Tlocal("发送失败: ", "send failed: ") + plugin.Escape(err.Error()))
 		}
 	}
@@ -245,27 +272,6 @@ func saveTemp(data []byte, ext string) (string, error) {
 	}
 	name := f.Name()
 	if _, err := f.Write(data); err != nil {
-		f.Close()
-		os.Remove(name)
-		return "", err
-	}
-	f.Close()
-	return name, nil
-}
-
-func mustReadFile(path string) []byte {
-	b, _ := os.ReadFile(path)
-	return b
-}
-
-func savePNG(img image.Image) (string, error) {
-	dir := os.TempDir()
-	f, err := os.CreateTemp(dir, "quote-*.png")
-	if err != nil {
-		return "", err
-	}
-	name := f.Name()
-	if err := encodePNG(f, img); err != nil {
 		f.Close()
 		os.Remove(name)
 		return "", err
@@ -302,19 +308,14 @@ func (p *QuotePlugin) sendSticker(ctx *plugin.CommandContext, path string, reply
 	if err != nil {
 		return err
 	}
-	peer, err := ctx.ResolvePeer()
-	if err != nil {
-		return err
-	}
 	req := &tg.MessagesSendMediaRequest{
-		Peer: peer,
+		Peer: &tg.InputPeerSelf{},
 		Media: &tg.InputMediaUploadedDocument{
 			File:     file,
 			MimeType: "image/webp",
 			Attributes: []tg.DocumentAttributeClass{
 				&tg.DocumentAttributeFilename{FileName: "quote.webp"},
 				&tg.DocumentAttributeSticker{Alt: "💜", Stickerset: &tg.InputStickerSetEmpty{}},
-				&tg.DocumentAttributeImageSize{W: 512, H: 512},
 			},
 		},
 	}
@@ -463,62 +464,103 @@ func abs(n int) int {
 
 // ---------------------------------------------------------------- build
 
-// buildRenderMsgs converts tg messages into render models (with avatar,
-// reply preview, media, voice/file rows).
-func (p *QuotePlugin) buildRenderMsgs(ctx *plugin.CommandContext, msgs []*tg.Message, args quoteArgs, emoji *emojiFont) []*renderMsg {
-	out := make([]*renderMsg, 0, len(msgs))
+// buildQuoteMessages converts tg messages into the quote-api message model:
+// name, avatar (base64), text + entities, media preview, voice/document/
+// audio rows and reply preview. Field names follow quote-api/generate.js.
+func (p *QuotePlugin) buildQuoteMessages(ctx *plugin.CommandContext, msgs []*tg.Message, args quoteArgs) []*quoteMessage {
+	out := make([]*quoteMessage, 0, len(msgs))
 	users := p.fetchUsers(ctx, msgs)
 	for _, m := range msgs {
-		rm := &renderMsg{senderID: plugin.SenderID(m), nameHidden: args.hidden}
-		if name := userName(users[rm.senderID]); name != "" {
-			rm.name = name
-		} else if ch := channelName(m); ch != "" {
-			rm.name = ch
-		} else {
-			rm.name = "User"
+		senderID := plugin.SenderID(m)
+		qm := &quoteMessage{
+			ChatID:      senderID,
+			MessageID:   m.ID,
+			AvatarScale: args.scale,
+			MediaCrop:   args.crop,
 		}
-		rm.bgColor = paletteColor(rm.senderID)
-		if !args.hidden {
-			rm.avatar = p.fetchAvatar(ctx, rm.senderID, users[rm.senderID])
+		name := "User"
+		if n := userName(users[senderID]); n != "" {
+			name = n
+		} else if ch := channelName(m); ch != "" {
+			name = ch
+		}
+		if args.hidden {
+			qm.From = &quoteFrom{ID: senderID, Name: false, FirstName: false}
+		} else {
+			qm.From = &quoteFrom{ID: senderID, Name: name, FirstName: name}
+			if av := p.fetchAvatarBytes(ctx, senderID, users[senderID]); len(av) > 0 {
+				qm.Avatar = true
+				qm.AvatarBuffer = base64.StdEncoding.EncodeToString(av)
+			}
 		}
 
 		// media classification first
 		kind, info, _, _ := classifyMedia(m.Media)
 		switch kind {
 		case mediaVoice:
-			rm.voice = &voiceInfo{waveform: info.waveform, duration: info.duration}
-			rm.text = m.Message
+			wf := make([]int, len(info.waveform))
+			for i, b := range info.waveform {
+				wf[i] = min(31, int(b))
+			}
+			if len(wf) > 0 {
+				qm.Voice = &bridgeVoice{Waveform: wf, Duration: info.duration}
+			}
+			qm.Text = m.Message
 		case mediaAudio:
-			rm.fileRow = &fileRow{name: audioLabel(info), size: info.size}
-			rm.text = m.Message
+			qm.Audio = &bridgeAudio{Title: audioLabel(info), Performer: info.performer, Duration: info.duration}
+			qm.Text = m.Message
 		case mediaDocument:
 			if shouldFetchPreview(kind, args.media) {
-				rm.media = fetchMediaPreview(ctx.Context(), ctx.API, m.Media)
+				qm.MediaCanvas = base64If(fetchMediaPreviewBytes(ctx.Context(), ctx.API, m.Media))
+				qm.MediaType = "photo"
 			}
-			if rm.media == nil {
-				rm.fileRow = &fileRow{name: info.fileName, size: info.size}
+			if qm.MediaCanvas == "" {
+				qm.Document = &bridgeDocument{FileName: info.fileName, FileSize: info.size}
 			}
-			rm.text = m.Message
+			qm.Text = m.Message
 		case mediaPhoto, mediaSticker, mediaAnimation, mediaVideo, mediaRoundVideo:
-			rm.media = fetchMediaPreview(ctx.Context(), ctx.API, m.Media)
-			rm.text = m.Message
+			if data := fetchMediaPreviewBytes(ctx.Context(), ctx.API, m.Media); len(data) > 0 {
+				qm.MediaCanvas = base64.StdEncoding.EncodeToString(data)
+				switch kind {
+				case mediaSticker:
+					qm.MediaType = "sticker"
+					qm.MediaMaxSize = 220 * args.scale
+					qm.MediaCrop = false
+				case mediaAnimation:
+					qm.MediaType = "gif"
+				case mediaVideo, mediaRoundVideo:
+					qm.MediaType = "video"
+				default:
+					qm.MediaType = "photo"
+				}
+				if kind == mediaVideo || kind == mediaRoundVideo || kind == mediaAnimation {
+					qm.MediaDur = info.duration
+				}
+			}
+			qm.Text = m.Message
 		default:
-			rm.text = messageText(m)
+			qm.Text = m.Message
 		}
-		if strings.TrimSpace(rm.text) == "" && rm.media == nil && rm.voice == nil && rm.fileRow == nil {
-			rm.text = fallbackText(kind)
-		}
-		rm.entities = entitiesOf(m)
+		qm.Caption = qm.Text
+		qm.Entities = bridgeEntities(m)
+		qm.CaptionEnts = qm.Entities
 
 		// reply preview
 		if args.reply {
 			if hdr, ok := m.ReplyTo.(*tg.MessageReplyHeader); ok && hdr.ReplyToMsgID > 0 {
-				rm.reply = p.fetchReplyPreview(ctx, hdr.ReplyToMsgID)
+				qm.ReplyMessage = p.fetchReplyPreview(ctx, hdr.ReplyToMsgID)
 			}
 		}
-		out = append(out, rm)
+		out = append(out, qm)
 	}
 	return out
+}
+
+func base64If(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString(b)
 }
 
 // userName returns a display name for a user entity.
@@ -547,26 +589,153 @@ func audioLabel(info *docInfo) string {
 	return "Audio"
 }
 
-func messageText(m *tg.Message) string { return m.Message }
-
-func fallbackText(kind mediaKind) string {
-	switch kind {
-	case mediaVoice:
-		return "[语音] Voice"
-	case mediaAudio:
-		return "[音频] Audio"
-	case mediaOther:
-		return "[媒体] Media"
-	}
-	return ""
-}
-
-func entitiesOf(m *tg.Message) []entityRef {
-	var out []entityRef
+// bridgeEntities maps tg entities onto the quote-api entity model (types
+// follow TeleBox convertEntities).
+func bridgeEntities(m *tg.Message) []bridgeEntity {
+	var out []bridgeEntity
 	for _, e := range m.Entities {
-		out = append(out, entityRef{kind: entityKindOf(e), offset: entityOffset(e), length: entityLength(e)})
+		be := bridgeEntity{
+			Type:   entityTypeOf(e),
+			Offset: entityOffset(e),
+			Length: entityLength(e),
+		}
+		switch v := e.(type) {
+		case *tg.MessageEntityTextURL:
+			be.URL = v.URL
+		case *tg.MessageEntityPre:
+			be.Language = v.Language
+		}
+		if be.Length > 0 && be.Type != "text" {
+			out = append(out, be)
+		}
 	}
 	return out
+}
+
+func entityTypeOf(e tg.MessageEntityClass) string {
+	switch e.(type) {
+	case *tg.MessageEntityBold:
+		return "bold"
+	case *tg.MessageEntityItalic:
+		return "italic"
+	case *tg.MessageEntityUnderline:
+		return "underline"
+	case *tg.MessageEntityStrike:
+		return "strikethrough"
+	case *tg.MessageEntityBlockquote:
+		return "blockquote"
+	case *tg.MessageEntitySpoiler:
+		return "spoiler"
+	case *tg.MessageEntityCode:
+		return "code"
+	case *tg.MessageEntityPre:
+		return "pre"
+	case *tg.MessageEntityTextURL:
+		return "text_link"
+	case *tg.MessageEntityMentionName:
+		return "text_mention"
+	case *tg.MessageEntityMention:
+		return "mention"
+	case *tg.MessageEntityHashtag:
+		return "hashtag"
+	case *tg.MessageEntityCashtag:
+		return "cashtag"
+	case *tg.MessageEntityBotCommand:
+		return "bot_command"
+	case *tg.MessageEntityURL:
+		return "url"
+	case *tg.MessageEntityEmail:
+		return "email"
+	case *tg.MessageEntityPhone:
+		return "phone_number"
+	case *tg.MessageEntityCustomEmoji:
+		return "custom_emoji"
+	}
+	return "text"
+}
+
+func entityOffset(e tg.MessageEntityClass) int {
+	switch v := e.(type) {
+	case *tg.MessageEntityBold:
+		return v.Offset
+	case *tg.MessageEntityItalic:
+		return v.Offset
+	case *tg.MessageEntityUnderline:
+		return v.Offset
+	case *tg.MessageEntityStrike:
+		return v.Offset
+	case *tg.MessageEntityBlockquote:
+		return v.Offset
+	case *tg.MessageEntitySpoiler:
+		return v.Offset
+	case *tg.MessageEntityCode:
+		return v.Offset
+	case *tg.MessageEntityPre:
+		return v.Offset
+	case *tg.MessageEntityTextURL:
+		return v.Offset
+	case *tg.MessageEntityMentionName:
+		return v.Offset
+	case *tg.MessageEntityMention:
+		return v.Offset
+	case *tg.MessageEntityHashtag:
+		return v.Offset
+	case *tg.MessageEntityCashtag:
+		return v.Offset
+	case *tg.MessageEntityBotCommand:
+		return v.Offset
+	case *tg.MessageEntityURL:
+		return v.Offset
+	case *tg.MessageEntityEmail:
+		return v.Offset
+	case *tg.MessageEntityPhone:
+		return v.Offset
+	case *tg.MessageEntityCustomEmoji:
+		return v.Offset
+	}
+	return 0
+}
+
+func entityLength(e tg.MessageEntityClass) int {
+	switch v := e.(type) {
+	case *tg.MessageEntityBold:
+		return v.Length
+	case *tg.MessageEntityItalic:
+		return v.Length
+	case *tg.MessageEntityUnderline:
+		return v.Length
+	case *tg.MessageEntityStrike:
+		return v.Length
+	case *tg.MessageEntityBlockquote:
+		return v.Length
+	case *tg.MessageEntitySpoiler:
+		return v.Length
+	case *tg.MessageEntityCode:
+		return v.Length
+	case *tg.MessageEntityPre:
+		return v.Length
+	case *tg.MessageEntityTextURL:
+		return v.Length
+	case *tg.MessageEntityMentionName:
+		return v.Length
+	case *tg.MessageEntityMention:
+		return v.Length
+	case *tg.MessageEntityHashtag:
+		return v.Length
+	case *tg.MessageEntityCashtag:
+		return v.Length
+	case *tg.MessageEntityBotCommand:
+		return v.Length
+	case *tg.MessageEntityURL:
+		return v.Length
+	case *tg.MessageEntityEmail:
+		return v.Length
+	case *tg.MessageEntityPhone:
+		return v.Length
+	case *tg.MessageEntityCustomEmoji:
+		return v.Length
+	}
+	return 0
 }
 
 // fetchUsers resolves sender names for all messages in one call.
@@ -602,8 +771,9 @@ func (p *QuotePlugin) fetchUsers(ctx *plugin.CommandContext, msgs []*tg.Message)
 	return out
 }
 
-// fetchAvatar downloads a user's photo (small size) as a square image.
-func (p *QuotePlugin) fetchAvatar(ctx *plugin.CommandContext, userID int64, uc tg.UserClass) image.Image {
+// fetchAvatarBytes downloads a user's photo (small size) as raw image bytes
+// (passed to the renderer as base64; it crops to a circle itself).
+func (p *QuotePlugin) fetchAvatarBytes(ctx *plugin.CommandContext, userID int64, uc tg.UserClass) []byte {
 	u, _ := uc.(*tg.User)
 	if ctx.API == nil || userID == 0 || u == nil {
 		return nil
@@ -639,16 +809,12 @@ func (p *QuotePlugin) fetchAvatar(ctx *plugin.CommandContext, userID int64, uc t
 	if err != nil {
 		return nil
 	}
-	img, err := decodeImage(data)
-	if err != nil {
-		return nil
-	}
-	return squareCrop(img)
+	return data
 }
 
 // fetchReplyPreview loads name+text of the replied message for the preview
 // block.
-func (p *QuotePlugin) fetchReplyPreview(ctx *plugin.CommandContext, msgID int) *renderReply {
+func (p *QuotePlugin) fetchReplyPreview(ctx *plugin.CommandContext, msgID int) *quoteReply {
 	if ctx.API == nil {
 		return nil
 	}
@@ -664,11 +830,11 @@ func (p *QuotePlugin) fetchReplyPreview(ctx *plugin.CommandContext, msgID int) *
 		if m.ID != msgID {
 			continue
 		}
-		name := userName(users[plugin.SenderID(m)])
+		senderID := plugin.SenderID(m)
+		name := userName(users[senderID])
 		if name == "" {
 			name = "User"
 		}
-		id := plugin.SenderID(m)
 		text := m.Message
 		if strings.TrimSpace(text) == "" {
 			kind, info, _, _ := classifyMedia(m.Media)
@@ -689,7 +855,14 @@ func (p *QuotePlugin) fetchReplyPreview(ctx *plugin.CommandContext, msgID int) *
 				text = "[视频] Video"
 			}
 		}
-		return &renderReply{name: name, text: truncVisually(text, 36), color: paletteColor(id)}
+		rp := &quoteReply{
+			ChatID:   senderID,
+			Name:     name,
+			Text:     truncVisually(text, 36),
+			Entities: []bridgeEntity{},
+			From:     &quoteFrom{ID: senderID, Name: name, FirstName: name},
+		}
+		return rp
 	}
 	return nil
 }
@@ -704,36 +877,14 @@ func channelName(m *tg.Message) string {
 	return ""
 }
 
-// loadFonts parses the wqy TTC once.
-func (p *QuotePlugin) loadFonts() error {
-	p.fontOnce.Do(func() {
-		f, err := openWQY()
-		if err != nil {
-			p.fontErr = err
-			return
-		}
-		faceCache.ttf = f
-	})
-	return p.fontErr
-}
-
-// squareCrop center-crops an image to a square (for avatars).
-func squareCrop(img image.Image) image.Image {
-	b := img.Bounds()
-	side := min(b.Dx(), b.Dy())
-	x0 := b.Min.X + (b.Dx()-side)/2
-	y0 := b.Min.Y + (b.Dy()-side)/2
-	type subImager interface {
-		SubImage(r image.Rectangle) image.Image
+// truncVisually truncates s to maxRunes with an ellipsis.
+func truncVisually(s string, maxRunes int) string {
+	r := []rune(s)
+	if len(r) <= maxRunes {
+		return s
 	}
-	if si, ok := img.(subImager); ok {
-		return si.SubImage(image.Rect(x0, y0, x0+side, y0+side))
+	if maxRunes <= 1 {
+		return "…"
 	}
-	dst := image.NewNRGBA(image.Rect(0, 0, side, side))
-	for y := 0; y < side; y++ {
-		for x := 0; x < side; x++ {
-			dst.Set(x, y, img.At(x0+x, y0+y))
-		}
-	}
-	return dst
+	return string(r[:maxRunes-1]) + "…"
 }

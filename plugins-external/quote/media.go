@@ -1,23 +1,19 @@
 package main
 
-// media.go — media download (photos, stickers, videos via ffmpeg first
-// frame) and decoding (jpeg/png/webp stdlib + x/image/webp).
+// media.go — media download for the quote renderer: photos, stickers,
+// animations/videos (first frame via ffmpeg when needed), returned as raw
+// bytes for the node renderer (base64 over the bridge).
 
 import (
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"image"
-	_ "image/jpeg"
-	_ "image/png"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
-
-	_ "golang.org/x/image/webp"
 
 	"github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/tg"
@@ -63,46 +59,6 @@ func ffmpegFirstFrame(ctx context.Context, input []byte, ext string) ([]byte, er
 		"scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos", "-f", "image2", out)
 	if out, err := exec.CommandContext(c, bin, args...).CombinedOutput(); err != nil {
 		msg := strings.TrimSpace(string(out))
-		if msg == "" {
-			msg = err.Error()
-		}
-		if i := strings.IndexByte(msg, '\n'); i > 0 {
-			msg = msg[:i]
-		}
-		return nil, fmt.Errorf("ffmpeg: %s", msg)
-	}
-	return os.ReadFile(out)
-}
-
-// decodeImage decodes jpeg/png/webp (static) bytes.
-func decodeImage(data []byte) (image.Image, error) {
-	img, _, err := image.Decode(bytes.NewReader(data))
-	return img, err
-}
-
-// ffmpegWebp converts PNG bytes to lossless webp (512px cap) for stickers.
-func ffmpegWebp(ctx context.Context, pngData []byte) ([]byte, error) {
-	bin, err := exec.LookPath("ffmpeg")
-	if err != nil {
-		return nil, errors.New("ffmpeg not found")
-	}
-	dir, err := os.MkdirTemp("", "quote-webp-")
-	if err != nil {
-		return nil, err
-	}
-	defer os.RemoveAll(dir)
-	in := filepath.Join(dir, "in.png")
-	out := filepath.Join(dir, "out.webp")
-	if err := os.WriteFile(in, pngData, 0o600); err != nil {
-		return nil, err
-	}
-	c, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-	args := []string{"-hide_banner", "-loglevel", "error", "-y", "-i", in,
-		"-vf", "scale=512:512:force_original_aspect_ratio=decrease",
-		"-c:v", "libwebp", "-lossless", "1", "-frames:v", "1", out}
-	if outB, err := exec.CommandContext(c, bin, args...).CombinedOutput(); err != nil {
-		msg := strings.TrimSpace(string(outB))
 		if msg == "" {
 			msg = err.Error()
 		}
@@ -243,9 +199,10 @@ func classifyMedia(m tg.MessageMediaClass) (mediaKind, *docInfo, *tg.Photo, *tg.
 	return mediaNone, nil, nil, nil
 }
 
-// fetchMediaPreview downloads and decodes the visual preview of a message's
-// media, or returns nil when it has none / on failure.
-func fetchMediaPreview(ctx context.Context, api *tg.Client, m tg.MessageMediaClass) image.Image {
+// fetchMediaPreviewBytes downloads the visual preview of a message's media
+// as raw image/video bytes (the node renderer decodes and crops), or nil
+// when it has none / on failure.
+func fetchMediaPreviewBytes(ctx context.Context, api *tg.Client, m tg.MessageMediaClass) []byte {
 	kind, info, photo, doc := classifyMedia(m)
 	switch kind {
 	case mediaPhoto:
@@ -257,11 +214,7 @@ func fetchMediaPreview(ctx context.Context, api *tg.Client, m tg.MessageMediaCla
 		if err != nil {
 			return nil
 		}
-		img, err := decodeImage(data)
-		if err != nil {
-			return nil
-		}
-		return img
+		return data
 	case mediaSticker:
 		ext := ".webp"
 		if strings.Contains(info.mime, "webm") {
@@ -274,17 +227,11 @@ func fetchMediaPreview(ctx context.Context, api *tg.Client, m tg.MessageMediaCla
 		}
 		if ext == ".webm" {
 			if png, err := ffmpegFirstFrame(ctx, data, ext); err == nil {
-				if img, err := decodeImage(png); err == nil {
-					return img
-				}
+				return png
 			}
 			return nil
 		}
-		img, err := decodeImage(data)
-		if err != nil {
-			return nil
-		}
-		return img
+		return data
 	case mediaAnimation, mediaVideo, mediaRoundVideo:
 		ext := ".mp4"
 		if strings.Contains(info.mime, "webm") {
@@ -299,11 +246,7 @@ func fetchMediaPreview(ctx context.Context, api *tg.Client, m tg.MessageMediaCla
 		if err != nil {
 			return nil
 		}
-		img, err := decodeImage(png)
-		if err != nil {
-			return nil
-		}
-		return img
+		return png
 	case mediaDocument:
 		// image documents get a preview
 		if !strings.HasPrefix(info.mime, "image/") {
@@ -315,20 +258,12 @@ func fetchMediaPreview(ctx context.Context, api *tg.Client, m tg.MessageMediaCla
 			return nil
 		}
 		if strings.Contains(info.mime, "gif") {
-			// ffmpeg for gif first frame (stdlib has no gif decoder
-			// registered by default in this plugin)
 			if png, err := ffmpegFirstFrame(ctx, data, ".gif"); err == nil {
-				if img, err := decodeImage(png); err == nil {
-					return img
-				}
+				return png
 			}
 			return nil
 		}
-		img, err := decodeImage(data)
-		if err != nil {
-			return nil
-		}
-		return img
+		return data
 	}
 	return nil
 }

@@ -1,31 +1,43 @@
 package main
 
 import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"image"
 	"image/color"
+	"image/png"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/gotd/td/tg"
 )
 
 func TestParseArgs(t *testing.T) {
+	defBG := "#231d2b/#372e44"
 	cases := []struct {
 		in   string
 		want quoteArgs
 	}{
-		{"", quoteArgs{count: 1, scale: 2, bg: "#231d2b/#372e44"}},
-		{"5", quoteArgs{count: 5, scale: 2, bg: "#231d2b/#372e44"}},
-		{"-10", quoteArgs{count: -10, scale: 2, bg: "#231d2b/#372e44"}},
-		{"100", quoteArgs{count: 50, scale: 2, bg: "#231d2b/#372e44"}},
-		{"r 3", quoteArgs{count: 3, reply: true, scale: 2, bg: "#231d2b/#372e44"}},
-		{"png", quoteArgs{count: 1, png: true, scale: 2, bg: "#231d2b/#372e44"}},
-		{"stories", quoteArgs{count: 1, png: true, stories: true, scale: 2, bg: "#231d2b/#372e44"}},
-		{"hidden media crop", quoteArgs{count: 1, hidden: true, media: true, crop: true, scale: 2, bg: "#231d2b/#372e44"}},
-		{"scale 4", quoteArgs{count: 1, scale: 4, bg: "#231d2b/#372e44"}},
-		{"s=8", quoteArgs{count: 1, scale: 8, bg: "#231d2b/#372e44"}},
-		{"scale 30", quoteArgs{count: 1, scale: 20, bg: "#231d2b/#372e44"}},
+		{"", quoteArgs{count: 1, scale: 2, bg: defBG}},
+		{"5", quoteArgs{count: 5, scale: 2, bg: defBG}},
+		{"-10", quoteArgs{count: -10, scale: 2, bg: defBG}},
+		{"100", quoteArgs{count: 50, scale: 2, bg: defBG}},
+		{"r 3", quoteArgs{count: 3, reply: true, scale: 2, bg: defBG}},
+		{"png", quoteArgs{count: 1, png: true, scale: 2, bg: defBG}},
+		{"stories", quoteArgs{count: 1, png: true, stories: true, scale: 2, bg: defBG}},
+		{"webp", quoteArgs{count: 1, scale: 2, bg: defBG}},
+		{"hidden media crop", quoteArgs{count: 1, hidden: true, media: true, crop: true, scale: 2, bg: defBG}},
+		{"scale 4", quoteArgs{count: 1, scale: 4, bg: defBG}},
+		{"s=8", quoteArgs{count: 1, scale: 8, bg: defBG}},
+		{"scale 30", quoteArgs{count: 1, scale: 20, bg: defBG}},
 		{"#1b1429", quoteArgs{count: 1, scale: 2, bg: "#1b1429"}},
 		{"#111/#222", quoteArgs{count: 1, scale: 2, bg: "#111/#222"}},
 		{"bg #0af", quoteArgs{count: 1, scale: 2, bg: "#0af"}},
 		{"bg=1a2b3c", quoteArgs{count: 1, scale: 2, bg: "#1a2b3c"}},
-		{"3 r png", quoteArgs{count: 3, reply: true, png: true, scale: 2, bg: "#231d2b/#372e44"}},
+		{"3 r png", quoteArgs{count: 3, reply: true, png: true, scale: 2, bg: defBG}},
 	}
 	for _, c := range cases {
 		got := parseArgs(c.in)
@@ -57,188 +69,354 @@ func TestColorTokens(t *testing.T) {
 	if n := normalizeColorToken("111/222"); n != "#111/#222" {
 		t.Errorf("normalizeColorToken → %q", n)
 	}
-}
-
-func TestParseHexColor(t *testing.T) {
-	c, ok := parseHexColor("#fff")
-	if !ok || c != (color.RGBA{0xFF, 0xFF, 0xFF, 0xFF}) {
-		t.Errorf("parseHexColor(#fff) = %v %v", c, ok)
-	}
-	c, ok = parseHexColor("#1b1429")
-	if !ok || c != (color.RGBA{0x1B, 0x14, 0x29, 0xFF}) {
-		t.Errorf("parseHexColor(#1b1429) = %v %v", c, ok)
-	}
-	if _, ok := parseHexColor("#1b142"); ok {
-		t.Error("parseHexColor(#1b142) should fail")
-	}
-	if _, ok := parseHexColor("zzz"); ok {
-		t.Error("parseHexColor(zzz) should fail")
+	// quote-api luminance-pair form survives normalization
+	if n := normalizeColorToken("//abc"); n != "//#abc" {
+		t.Errorf("normalizeColorToken(//abc) → %q, want //#abc", n)
 	}
 }
 
-func TestBackgroundColor(t *testing.T) {
-	c1, c2, grad := backgroundColor("#111/#222")
-	if !grad || c1 != (color.RGBA{0x11, 0x11, 0x11, 0xFF}) || c2 != (color.RGBA{0x22, 0x22, 0x22, 0xFF}) {
-		t.Errorf("backgroundColor gradient = %v %v %v", c1, c2, grad)
-	}
-	c1, c2, grad = backgroundColor("#abc")
-	if grad || c1 != c2 {
-		t.Errorf("backgroundColor single = %v %v %v", c1, c2, grad)
-	}
-	// invalid falls back to default
-	c1, _, _ = backgroundColor("nope")
-	if c1 != (color.RGBA{0x23, 0x1D, 0x2B, 0xFF}) {
-		t.Errorf("backgroundColor fallback = %v", c1)
-	}
-}
+// ---------------------------------------------------------------- bridge frame
 
-func TestSplitStyles(t *testing.T) {
-	// bold over "bc" (UTF-16 offsets)
-	rs := splitStyles("abcd", []entityRef{{kind: "bold", offset: 1, length: 2}})
-	if len(rs) != 4 {
-		t.Fatalf("len=%d", len(rs))
-	}
-	if rs[1].s.bold != true || rs[2].s.bold != true || rs[0].s.bold || rs[3].s.bold {
-		t.Errorf("bold span wrong: %+v", rs)
-	}
-	// CJK with astral emoji ( surrogate pair counts 2 units )
-	rs = splitStyles("a😀b", []entityRef{{kind: "italic", offset: 1, length: 2}})
-	if !rs[1].s.italic {
-		t.Errorf("emoji should be italic: %+v", rs[1])
-	}
-	if rs[2].s.italic {
-		t.Errorf("b should not be italic")
-	}
-}
-
-func TestWrapCells(t *testing.T) {
-	// 5 cells per word, 10px each; CJK cells separate
-	mk := func(r rune) cell { return cell{r: r, w: 10} }
-	latin := []cell{}
-	for _, r := range "aa bb cc" {
-		latin = append(latin, mk(r))
-	}
-	chunks := buildChunks(latin)
-	lines := wrapCells(chunks, 50) // fits "aa bb" exactly
-	var got []string
-	for _, ln := range lines {
-		s := ""
-		for _, c := range ln {
-			s += string(c.r)
-		}
-		got = append(got, s)
-	}
-	if len(got) != 2 || got[0] != "aa bb" || got[1] != "cc" {
-		t.Errorf("wrap = %q", got)
-	}
-
-	// CJK breaks anywhere
-	cjk := []cell{}
-	for _, r := range "你好世界" {
-		cjk = append(cjk, mk(r))
-	}
-	lines = wrapCells(buildChunks(cjk), 30) // 3 per line
-	if len(lines) != 2 || len(lines[0]) != 3 || len(lines[1]) != 1 {
-		t.Errorf("cjk wrap = %d lines %v", len(lines), lines)
-	}
-
-	// unbreakable long word hard-splits
-	long := []cell{}
-	for i := 0; i < 9; i++ {
-		long = append(long, mk('x'))
-	}
-	lines = wrapCells(buildChunks(long), 40) // 4 per line
-	if len(lines) != 3 || len(lines[0]) != 4 {
-		t.Errorf("hard split = %d lines", len(lines))
-	}
-}
-
-func TestEmojiFontCanned(t *testing.T) {
-	if _, err := loadEmojiFont(); err != nil {
-		t.Skipf("emoji font unavailable: %v", err)
-	}
-	e, _ := loadEmojiFont()
-	// known glyphs
-	if g := e.glyph(0x1F600); g == 0 {
-		t.Error("1F600 unmapped")
-	}
-	// PNG decodes for a handful of emoji
-	for _, cp := range []rune{0x1F600, 0x2764, 0x1F44D, 0x263A} {
-		g := e.glyph(cp)
-		if g == 0 {
-			continue
-		}
-		if img := e.emojiImage(g); img == nil {
-			t.Errorf("no bitmap for %U", cp)
-		}
-	}
-	// ligature: CN flag 1F1E8 1F1F3
-	cn := e.glyph(0x1F1E8)
-	flag2 := e.glyph(0x1F1F3)
-	if cn != 0 && flag2 != 0 {
-		if g, n, ok := e.ligature([]uint16{cn, flag2}, 0); !ok || n != 2 || g == 0 {
-			t.Errorf("CN flag ligature failed: %d %d %v", g, n, ok)
-		}
-	}
-	// skin tone ligature: 1F44D 1F3FB
-	thumb, skin := e.glyph(0x1F44D), e.glyph(0x1F3FB)
-	if thumb != 0 && skin != 0 {
-		if _, _, ok := e.ligature([]uint16{thumb, skin}, 0); !ok {
-			t.Error("thumbs-up + skin tone ligature failed")
-		}
-	}
-}
-
-func TestBuildCellsEmoji(t *testing.T) {
-	e, err := loadEmojiFont()
+func TestParseBridgeFrame(t *testing.T) {
+	// valid png frame
+	data := []byte{0x89, 0x50, 0x4E, 0x47, 1, 2, 3, 4}
+	frame := frameFor(data, "png")
+	res, err := parseBridgeFrame(frame)
 	if err != nil {
-		t.Skipf("emoji font unavailable: %v", err)
+		t.Fatalf("parseBridgeFrame: %v", err)
 	}
-	// 1F600 + VS16 + skin (ignored) renders as one emoji cell
-	in := []styledRune{{r: 0x1F600}, {r: 0xFE0F}, {r: 'a'}}
-	cells := buildCells(in, e, 26, nil, nil)
-	if len(cells) != 2 || !cells[0].emoji || cells[1].r != 'a' {
-		t.Errorf("cells = %+v", cells)
+	if res.Ext != "png" || len(res.Data) != len(data) || res.Data[0] != 0x89 {
+		t.Errorf("res = %+v", res)
 	}
-	// CN flag folds into one cell
-	in = []styledRune{{r: 0x1F1E8}, {r: 0x1F1F3}, {r: 'x'}}
-	cells = buildCells(in, e, 26, nil, nil)
-	if len(cells) != 2 || !cells[0].emoji || cells[0].glyph == 0 {
-		t.Errorf("flag cells = %+v", cells)
+	if detectImageExt(res.Data) != "png" {
+		t.Errorf("detectImageExt png failed")
+	}
+
+	// webp frame
+	webp := append([]byte("RIFF____WEBP"), 9, 9)
+	frame = frameFor(webp, "webp")
+	res, err = parseBridgeFrame(frame)
+	if err != nil || res.Ext != "webp" {
+		t.Errorf("webp frame: %+v %v", res, err)
+	}
+	if detectImageExt(res.Data) != "webp" {
+		t.Errorf("detectImageExt webp failed")
+	}
+
+	// webm frame
+	frame = frameFor([]byte{0x1a, 0x45, 0xdf, 0xa3, 0}, "webm")
+	if res, err = parseBridgeFrame(frame); err != nil || res.Ext != "webm" {
+		t.Errorf("webm frame: %+v %v", res, err)
+	}
+
+	// truncated
+	if _, err := parseBridgeFrame(frame[:10]); err == nil {
+		t.Error("truncated frame should fail")
+	}
+	// bad magic
+	bad := frameFor(data, "png")
+	bad[0] = 'X'
+	if _, err := parseBridgeFrame(bad); err == nil {
+		t.Error("bad magic should fail")
+	}
+	// length mismatch
+	bad = frameFor(data, "png")
+	bad[4] = 0xFF
+	if _, err := parseBridgeFrame(bad); err == nil {
+		t.Error("length mismatch should fail")
+	}
+	// unknown ext code
+	bad = frameFor(data, "png")
+	bad[8] = 0
+	bad[9], bad[10], bad[11] = 0, 0, 9
+	if _, err := parseBridgeFrame(bad); err == nil {
+		t.Error("unknown ext should fail")
 	}
 }
 
-func TestRenderSmoke(t *testing.T) {
-	// the wqy font must load for a real render
-	f, err := openWQY()
+func TestBridgeRequestJSON(t *testing.T) {
+	msg := &quoteMessage{
+		ChatID: 42, MessageID: 7,
+		From: &quoteFrom{ID: 42, Name: "Alice", FirstName: "Alice"},
+		Text: "hello", Caption: "hello",
+		Entities: []bridgeEntity{{Type: "bold", Offset: 0, Length: 2}},
+	}
+	raw, err := json.Marshal(msg)
 	if err != nil {
-		t.Skipf("wqy font unavailable: %v", err)
+		t.Fatal(err)
 	}
-	faceCache.ttf = f
-	e, _ := loadEmojiFont()
-	opt := renderOptions{scale: 2, emojiFont: e}
-	r := newRenderer(opt)
-	msgs := []*renderMsg{
-		{senderID: 42, name: "张三", text: "你好，世界！Hello world 😀", avatar: nil, bgColor: paletteColor(42)},
-		{senderID: 7, name: "Alice", text: "multi\nline 中文 and English text", reply: &renderReply{name: "Bob", text: "replied text", color: paletteColor(3)}},
+	req := &bridgeRequest{
+		Messages:        []json.RawMessage{raw},
+		Type:            "quote",
+		Format:          "webp",
+		Scale:           2,
+		BackgroundColor: "#231d2b/#372e44",
+		EmojiBrand:      "apple",
+		AssetsDir:       "/tmp/x",
 	}
-	img := r.renderQuoteImage(msgs, color.RGBA{0x23, 0x1D, 0x2B, 0xFF}, color.RGBA{0x37, 0x2E, 0x44, 0xFF})
-	if img.Bounds().Dx() < 100 || img.Bounds().Dy() < 50 {
-		t.Errorf("image too small: %v", img.Bounds())
+	b, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"messages", "type", "format", "scale", "backgroundColor", "emojiBrand", "assetsDir"} {
+		if _, ok := back[key]; !ok {
+			t.Errorf("payload missing %q", key)
+		}
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	// quote-api field names the renderer reads
+	for _, key := range []string{"chatId", "message_id", "from", "text", "entities", "caption"} {
+		if _, ok := m[key]; !ok {
+			t.Errorf("message json missing %q", key)
+		}
+	}
+	// optional renderer fields must exist as json tags (omitempty drops them
+	// only when unset) — round-trip a message that sets every one
+	full := &quoteMessage{
+		AvatarBuffer: "aGk=",
+		ReplyMessage: &quoteReply{Name: "n", Text: "t", From: &quoteFrom{ID: 1, Name: "n", FirstName: "n"}},
+		MediaCanvas:  "aGk=",
+		Voice:        &bridgeVoice{Waveform: []int{1, 2}},
+		Document:     &bridgeDocument{FileName: "f"},
+		Audio:        &bridgeAudio{Title: "t"},
+		GroupPos:     "single",
+	}
+	fullRaw, _ := json.Marshal(full)
+	for _, key := range []string{"avatarBuffer", "replyMessage", "mediaCanvas", "voice", "document", "audio", "groupPos"} {
+		if !strings.Contains(string(fullRaw), key) {
+			t.Errorf("message json missing %q tag", key)
+		}
+	}
+	// hidden name must serialize to false, not be dropped
+	hid, _ := json.Marshal(&quoteMessage{From: &quoteFrom{ID: 1, Name: false, FirstName: false}})
+	if !strings.Contains(string(hid), `"name":false`) {
+		t.Errorf("hidden name should be false: %s", hid)
 	}
 }
 
-func TestTruncAndFormat(t *testing.T) {
+func TestRunBridgeNodeMissing(t *testing.T) {
+	// with node hidden from PATH the bridge must fail with a clear error
+	t.Setenv("PATH", "/nonexistent")
+	if nodeRuntime() != "" {
+		t.Skip("node still resolvable")
+	}
+	if _, err := runBridge(t.Context(), nil, &bridgeRequest{Messages: []json.RawMessage{[]byte("{}")}}); err == nil {
+		t.Error("runBridge should fail without node")
+	} else if !strings.Contains(err.Error(), "node") {
+		t.Errorf("error should mention node: %v", err)
+	}
+}
+
+func TestEnsureBridgeFile(t *testing.T) {
+	dir := t.TempDir()
+	p, err := ensureBridgeFile(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(p, "bridge.mjs") {
+		t.Errorf("path = %q", p)
+	}
+	if len(bridgeSource) < 1000 {
+		t.Errorf("bridgeSource suspiciously short: %d bytes", len(bridgeSource))
+	}
+	if !strings.Contains(bridgeSource, "generateQuote") {
+		t.Error("bridgeSource must call generateQuote")
+	}
+	if !strings.Contains(bridgeSource, "raw.githubusercontent.com/LyoSU/quote-api") {
+		t.Error("bridgeSource must pull official quote-api assets")
+	}
+	// second call is a no-op rewrite with identical content
+	if _, err := ensureBridgeFile(dir); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// ---------------------------------------------------------------- entities / models
+
+func TestEntityMapping(t *testing.T) {
+	m := &tg.Message{
+		Message: "bold text",
+		Entities: []tg.MessageEntityClass{
+			&tg.MessageEntityBold{Offset: 0, Length: 4},
+			&tg.MessageEntityTextURL{Offset: 5, Length: 4, URL: "https://x"},
+		},
+	}
+	ents := bridgeEntities(m)
+	if len(ents) != 2 {
+		t.Fatalf("ents = %+v", ents)
+	}
+	if ents[0].Type != "bold" || ents[0].Offset != 0 || ents[0].Length != 4 {
+		t.Errorf("ent0 = %+v", ents[0])
+	}
+	if ents[1].Type != "text_link" || ents[1].URL != "https://x" {
+		t.Errorf("ent1 = %+v", ents[1])
+	}
+
+	// unmapped entity kinds are dropped, not passed as "text"
+	m2 := &tg.Message{Message: "x", Entities: []tg.MessageEntityClass{&tg.MessageEntityUnknown{}}}
+	if got := bridgeEntities(m2); len(got) != 0 {
+		t.Errorf("unknown entity should be dropped: %+v", got)
+	}
+}
+
+func TestTruncVisually(t *testing.T) {
 	if s := truncVisually("hello", 3); s != "he…" {
 		t.Errorf("trunc = %q", s)
 	}
 	if s := truncVisually("hi", 10); s != "hi" {
 		t.Errorf("trunc = %q", s)
 	}
-	if s := formatDuration(75); s != "1:15" {
-		t.Errorf("dur = %q", s)
+}
+
+func TestClassifyAndDocInfo(t *testing.T) {
+	voiceDoc := &tg.Document{
+		MimeType: "audio/ogg",
+		Attributes: []tg.DocumentAttributeClass{
+			&tg.DocumentAttributeAudio{Voice: true, Duration: 12, Waveform: []byte{1, 2, 200, 31, 99}},
+		},
 	}
-	if s := humanSize(1536); s != "1.5 KB" {
-		t.Errorf("humanSize = %q", s)
+	kind, info, _, _ := classifyMedia(&tg.MessageMediaDocument{Document: voiceDoc})
+	if kind != mediaVoice {
+		t.Fatalf("kind = %v", kind)
 	}
+	if info.duration != 12 || len(info.waveform) != 5 {
+		t.Errorf("info = %+v", info)
+	}
+	// waveform clamp is applied at build time (vendor expects 0..31)
+	clamped := make([]int, len(info.waveform))
+	for i, b := range info.waveform {
+		clamped[i] = min(31, int(b))
+	}
+	if clamped[2] != 31 || clamped[4] != 31 {
+		t.Errorf("clamp = %v", clamped)
+	}
+
+	audioDoc := &tg.Document{
+		MimeType: "audio/mp3",
+		Attributes: []tg.DocumentAttributeClass{
+			&tg.DocumentAttributeAudio{Title: "Song", Performer: "Artist", Duration: 90},
+		},
+	}
+	kind, info, _, _ = classifyMedia(&tg.MessageMediaDocument{Document: audioDoc})
+	if kind != mediaAudio || info.title != "Song" || info.performer != "Artist" {
+		t.Errorf("audio: %v %+v", kind, info)
+	}
+
+	fileDoc := &tg.Document{
+		MimeType:   "application/zip",
+		Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: "a.zip"}},
+	}
+	kind, info, _, _ = classifyMedia(&tg.MessageMediaDocument{Document: fileDoc})
+	if kind != mediaDocument || info.fileName != "a.zip" {
+		t.Errorf("doc: %v %+v", kind, info)
+	}
+}
+
+func TestShouldFetchPreview(t *testing.T) {
+	if !shouldFetchPreview(mediaPhoto, false) || !shouldFetchPreview(mediaSticker, false) {
+		t.Error("photo/sticker should always fetch")
+	}
+	if shouldFetchPreview(mediaDocument, false) {
+		t.Error("document should not fetch unless forced")
+	}
+	if !shouldFetchPreview(mediaDocument, true) {
+		t.Error("forced document should fetch")
+	}
+}
+
+func TestOutTypeSelection(t *testing.T) {
+	// mirrors handleQuote: stories→stories/png, png→image/png, else quote/webp
+	cases := []struct {
+		args            quoteArgs
+		wantType, wantF string
+	}{
+		{quoteArgs{}, "quote", "webp"},
+		{quoteArgs{png: true}, "image", "png"},
+		{quoteArgs{stories: true, png: true}, "stories", "png"},
+	}
+	for _, c := range cases {
+		outType := "quote"
+		if c.args.stories {
+			outType = "stories"
+		} else if c.args.png {
+			outType = "image"
+		}
+		outFormat := "png"
+		if outType == "quote" {
+			outFormat = "webp"
+		}
+		if outType != c.wantType || outFormat != c.wantF {
+			t.Errorf("args %+v → %s/%s, want %s/%s", c.args, outType, outFormat, c.wantType, c.wantF)
+		}
+	}
+}
+
+// TestBridgeE2E exercises the real node bridge end to end (asset download,
+// npm install, official renderer). Opt-in only — tests must not touch the
+// network by default. Run with: QUOTE_E2E=1 go test -run E2E -timeout 30m
+func TestBridgeE2E(t *testing.T) {
+	if os.Getenv("QUOTE_E2E") == "" {
+		t.Skip("set QUOTE_E2E=1 to run the live node bridge test (network + ~200MB assets)")
+	}
+	if nodeRuntime() == "" {
+		t.Fatal("node not found")
+	}
+	avatar := base64.StdEncoding.EncodeToString(genAvatarPNG(t))
+
+	msg := &quoteMessage{
+		ChatID: 42, MessageID: 1, AvatarScale: 2,
+		From:         &quoteFrom{ID: 42, Name: "张三", FirstName: "张三"},
+		Text:         "你好，世界！Hello 😀 e2e",
+		Entities:     []bridgeEntity{{Type: "bold", Offset: 0, Length: 2}},
+		Avatar:       true,
+		AvatarBuffer: avatar,
+	}
+	raw, _ := json.Marshal(msg)
+	dir := filepath.Join(t.TempDir(), "assets")
+	res, err := runBridge(t.Context(), nil, &bridgeRequest{
+		Messages:        []json.RawMessage{raw},
+		Type:            "quote",
+		Format:          "webp",
+		Scale:           2,
+		BackgroundColor: defaultBackground,
+		EmojiBrand:      "apple",
+		AssetsDir:       dir,
+	})
+	if err != nil {
+		t.Fatalf("runBridge: %v", err)
+	}
+	if len(res.Data) < 1000 {
+		t.Fatalf("rendered image too small: %d bytes", len(res.Data))
+	}
+	if got := detectImageExt(res.Data); got != res.Ext {
+		t.Errorf("frame ext %q but bytes sniff as %q", res.Ext, got)
+	}
+	t.Logf("rendered %d bytes %s", len(res.Data), res.Ext)
+}
+
+// genAvatarPNG draws a small red/blue square avatar in memory.
+func genAvatarPNG(t *testing.T) []byte {
+	const s = 64
+	img := image.NewRGBA(image.Rect(0, 0, s, s))
+	for y := 0; y < s; y++ {
+		for x := 0; x < s; x++ {
+			if x < s/2 {
+				img.Set(x, y, color.RGBA{0xE0, 0x40, 0x40, 0xFF})
+			} else {
+				img.Set(x, y, color.RGBA{0x40, 0x60, 0xE0, 0xFF})
+			}
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
 }

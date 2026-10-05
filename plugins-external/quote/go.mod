@@ -5,7 +5,6 @@ go 1.25.0
 require (
 	github.com/TiaraBasori/PaperValet v0.1.0
 	github.com/gotd/td v0.161.0
-	golang.org/x/image v0.44.0
 )
 
 require (
@@ -24,7 +23,6 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
 )
 
 replace github.com/TiaraBasori/PaperValet => ../../../PaperValet
