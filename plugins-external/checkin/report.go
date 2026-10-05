@@ -37,7 +37,7 @@ func (p *CheckinPlugin) cmdRun(ctx *plugin.CommandContext) error {
 		p.mu.Lock()
 		p.running = true
 		p.mu.Unlock()
-		p.runAll(runCtx, sourceManual)
+		p.runAll(runCtx, sourceManual, chatID)
 		p.mu.Lock()
 		p.running = false
 		p.mu.Unlock()
@@ -49,8 +49,9 @@ func (p *CheckinPlugin) cmdRun(ctx *plugin.CommandContext) error {
 	return nil
 }
 
-// report builds the summary and pushes it to the configured chat.
-func (p *CheckinPlugin) report(ctx context.Context, source string, results []runResult) {
+// report builds the summary and pushes it: the panel chat when set, else the
+// chat where targets were added, else the chat that triggered a manual run.
+func (p *CheckinPlugin) report(ctx context.Context, source string, results []runResult, fallback int64) {
 	if len(results) == 0 {
 		return
 	}
@@ -86,6 +87,9 @@ func (p *CheckinPlugin) report(ctx context.Context, source string, results []run
 	}
 
 	chat := p.notifyChat()
+	if chat == 0 {
+		chat = fallback
+	}
 	if chat == 0 {
 		return
 	}

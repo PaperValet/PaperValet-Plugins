@@ -237,7 +237,7 @@ func (p *CheckinPlugin) tick(ctx context.Context) {
 	p.mu.Unlock()
 
 	if state == stateRun && enabled {
-		p.runAll(ctx, sourceAuto)
+		p.runAll(ctx, sourceAuto, 0)
 	}
 	p.mu.Lock()
 	p.running = false
@@ -245,7 +245,7 @@ func (p *CheckinPlugin) tick(ctx context.Context) {
 }
 
 // runAll signs in to every enabled target and pushes the summary.
-func (p *CheckinPlugin) runAll(ctx context.Context, source string) {
+func (p *CheckinPlugin) runAll(ctx context.Context, source string, fallback int64) {
 	var results []runResult
 	for _, t := range p.enabledTargets() {
 		if len(results) > 0 {
@@ -259,7 +259,7 @@ func (p *CheckinPlugin) runAll(ctx context.Context, source string) {
 	if source == sourceAuto && p.set != nil && !p.set.Bool("notify") {
 		return
 	}
-	p.report(ctx, source, results)
+	p.report(ctx, source, results, fallback)
 }
 
 // applyZone reloads the timezone from the panel.
