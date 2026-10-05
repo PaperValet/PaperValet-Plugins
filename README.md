@@ -20,6 +20,7 @@ External plugins for [PaperValet](https://github.com/PaperValet/PaperValet) · [
 | 插件 Plugin | 命令 Command | 作用 | What it does |
 |---|---|---|---|
 | ai | `ai` | AI 对话，可配置模型和提示词 | Chat with an AI, configurable model and prompt |
+| annualreport | `annualreport` | 生成群年度/时段报告：活跃、 Top 发言、时段分布 | Chat stats report: activity, top talkers, hour bins |
 | atadmins | `atadmins` | 一键艾特全部管理员 | Mention every group admin |
 | autochangename | `autochangename` | 自动轮换账号名字/简介 | Auto-rotate the account name or bio |
 | ban | `ban` · `unban` · `kick` · `mute` · `unmute` · `sb` · `unsb` · `refresh` | 封禁、踢出、禁言与跨群批量封禁 | Ban, kick, mute and cross-group batch bans |
