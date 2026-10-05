@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -13,8 +15,10 @@ import (
 )
 
 const (
-	apiURL   = "https://api.oddfar.com/yl/q.php?c=1009&encode=text"
-	attempts = 5
+	apiURL    = "https://api.oddfar.com/yl/q.php?c=1009&encode=text"
+	attempts  = 5
+	maxText   = 4000 // Edit hard-fails past 4096; leave headroom
+	rateLimit = 5    // seconds between calls; shared third-party quota
 )
 
 var Metadata = &plugin.PluginMetadata{
@@ -43,6 +47,7 @@ func (p *DissPlugin) Init(_ context.Context, mgr plugin.Manager) error {
 		UsageEN:     "diss",
 		Plugin:      p.Name(),
 		Category:    "fun",
+		RateLimit:   rateLimit,
 		Handler:     p.handle,
 	})
 }
@@ -61,7 +66,7 @@ func (p *DissPlugin) handle(ctx *plugin.CommandContext) error {
 	if err != nil {
 		return ctx.Edit("❌ " + ctx.Tlocal("试了好多次都连不上 API：", "API unreachable after several tries: ") + plugin.Escape(err.Error()))
 	}
-	return ctx.Edit(plugin.Escape(text))
+	return ctx.Edit(plugin.Escape(clip(text, maxText)))
 }
 
 func (p *DissPlugin) fetch(ctx context.Context) (string, error) {
@@ -78,10 +83,50 @@ func (p *DissPlugin) fetch(ctx context.Context) (string, error) {
 		if err == nil {
 			return s, nil
 		}
+		if !retryable(err) {
+			// A 4xx or a garbage body will fail again; do not burn
+			// the remaining attempts waiting it out.
+			return "", err
+		}
 		last = err
 	}
 	return "", last
 }
+
+// retryable reports whether another attempt can help: transport errors and
+// 5xx are worth retrying, definitive answers are not.
+func retryable(err error) bool {
+	var he *httpErr
+	if errors.As(err, &he) {
+		return he.status >= 500
+	}
+	var ne net.Error
+	if errors.As(err, &ne) {
+		return true
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		return true
+	}
+	// http.Client wraps most transport failures in *url.Error.
+	var ue *url.Error
+	return errors.As(err, &ue)
+}
+
+// clip truncates text to at most n runes.
+func clip(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
+
+// httpErr carries a definitive HTTP status from once.
+type httpErr struct {
+	status int
+}
+
+func (e *httpErr) Error() string { return fmt.Sprintf("HTTP %d", e.status) }
 
 func (p *DissPlugin) once(ctx context.Context) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
@@ -95,7 +140,7 @@ func (p *DissPlugin) once(ctx context.Context) (string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
+		return "", &httpErr{status: resp.StatusCode}
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if err != nil {
