@@ -61,6 +61,7 @@ External plugins for [PaperValet](https://github.com/PaperValet/PaperValet) · [
 | sticker | `sticker` | 贴纸包管理、图转贴纸、贴纸转图 | Sticker pack management, photo→sticker, sticker→photo |
 | subinfo | `subinfo` · `cha` | 查询机场订阅流量与节点信息 | Query proxy subscription traffic and node info |
 | teletype | `teletype` | 打字机效果：逐字打出文本（带光标），可自动加到自己消息上 | Typewriter effect: retype text char by char (with cursor), auto mode for own messages |
+| textmode | `textmode` | 自动给自己发的消息加格式（粗体/下划线/遮罩等） | Auto-format your own messages (bold/underline/spoiler…) |
 | trace | `trace` | 自动给指定用户或关键字的消息贴表情回应 | Auto-react to messages from chosen users or with keywords |
 | weather | `weather` | 天气查询 | Weather |
 | whois | `whois` | 查看用户/群组详细信息 | Detailed user or chat info |
