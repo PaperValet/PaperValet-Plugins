@@ -41,6 +41,7 @@ External plugins for [PaperValet](https://github.com/PaperValet/PaperValet) · [
 | save | `save` | 保存和转发消息，绕过禁止转发 | Save messages, even from no-forward chats |
 | sendat | `sendat` | 定时发送消息，重启不丢 | Scheduled messages that survive restarts |
 | speedtest | `speedtest` · `st` | Ookla 网速测试 | Speedtest by Ookla |
+| teletype | `teletype` | 打字机效果：逐字打出文本（带光标），可自动加到自己消息上 | Typewriter effect: retype text char by char (with cursor), auto mode for own messages |
 | trace | `trace` | 自动给指定用户或关键字的消息贴表情回应 | Auto-react to messages from chosen users or with keywords |
 | weather | `weather` | 天气查询 | Weather |
 
