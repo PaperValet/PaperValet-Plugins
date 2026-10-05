@@ -304,10 +304,12 @@ func parseContentParts(raw json.RawMessage) (string, error) {
 }
 
 // geminiChat posts a generateContent request with systemInstruction and the
-// image as inlineData, temperature 0.7.
+// image as inlineData, temperature 0.7. The key travels in the
+// x-goog-api-key header, not the query string, so it stays out of proxy and
+// server access logs.
 func geminiChat(ctx context.Context, client *http.Client, cfg apiConfig, question string, img *mediaInput) (string, error) {
 	base := strings.TrimRight(cfg.baseURL, "/")
-	endpoint := base + "/models/" + url.PathEscape(cfg.model) + ":generateContent?key=" + url.QueryEscape(cfg.key)
+	endpoint := base + "/models/" + url.PathEscape(cfg.model) + ":generateContent"
 
 	parts := []map[string]any{}
 	if text := strings.TrimSpace(question); text != "" {
@@ -331,7 +333,7 @@ func geminiChat(ctx context.Context, client *http.Client, cfg apiConfig, questio
 		},
 	}
 	payload, _ := json.Marshal(body)
-	data, err := postJSON(ctx, client, endpoint, payload, nil)
+	data, err := postJSON(ctx, client, endpoint, payload, map[string]string{"x-goog-api-key": cfg.key})
 	if err != nil {
 		return "", err
 	}
@@ -374,7 +376,10 @@ func postJSON(ctx context.Context, client *http.Client, endpoint string, body []
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, &apiError{status: resp.StatusCode, msg: extractProviderError(raw)}
 	}
@@ -411,7 +416,7 @@ func (p *XmslPlugin) mediaFromReply(ctx *plugin.CommandContext, reply *tg.Messag
 	if reply.Media == nil {
 		return nil, nil
 	}
-	dir, err := p.host.DataDir("xmsl")
+	dir, err := p.host.DataDir(p.Name())
 	if err != nil {
 		return nil, err
 	}
