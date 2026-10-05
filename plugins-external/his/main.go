@@ -19,6 +19,9 @@ const (
 	maxCount     = 100
 	previewRunes = 50
 	chunkRunes   = 3800
+	// maxFloodRetries bounds FLOOD_WAIT retries so an extreme rate limit
+	// cannot hang the command until the host timeout.
+	maxFloodRetries = 3
 )
 
 var Metadata = &plugin.PluginMetadata{
@@ -94,11 +97,35 @@ func validTarget(s string) bool {
 	return err == nil
 }
 
+// realReply returns the id of the message the command actually replies to.
+// A plain message inside a forum topic carries a reply header pointing at
+// the topic root; that is not a reply (same distinction as save's
+// replyTarget and the host's re.go).
+func realReply(ev *plugin.MessageEvent) int {
+	if ev == nil || ev.Message == nil {
+		return 0
+	}
+	hdr, ok := ev.Message.ReplyTo.(*tg.MessageReplyHeader)
+	if !ok {
+		return 0
+	}
+	id, has := hdr.GetReplyToMsgID()
+	if !has || id <= 0 {
+		return 0
+	}
+	if hdr.ForumTopic {
+		if _, hasTop := hdr.GetReplyToTopID(); !hasTop {
+			return 0
+		}
+	}
+	return id
+}
+
 func (p *HisPlugin) handle(ctx *plugin.CommandContext) error {
 	if ctx.Message == nil || ctx.Message.Message == nil {
 		return plugin.ErrNoMessage
 	}
-	q, ok := parseArgs(ctx.Args, ctx.Message.IsReply)
+	q, ok := parseArgs(ctx.Args, realReply(ctx.Message) != 0)
 	if !ok {
 		return ctx.Edit(helpText(ctx.Tlocal))
 	}
@@ -182,7 +209,11 @@ func resolveFrom(ctx *plugin.CommandContext, peer tg.InputPeerClass, target stri
 		}
 		return from, nil
 	}
-	msgs, _, _, err := plugin.GetMessages(ctx.Context(), ctx.API, peer, ctx.Message.ReplyToID)
+	reply := realReply(ctx.Message)
+	if reply == 0 {
+		return nil, errors.New(tl("回复一条消息，或指定 @用户名/ID", "Reply to a message, or give a @username/ID"))
+	}
+	msgs, _, _, err := plugin.GetMessages(ctx.Context(), ctx.API, peer, reply)
 	if err != nil {
 		return nil, err
 	}
@@ -214,10 +245,10 @@ func search(ctx context.Context, api *tg.Client, peer, from tg.InputPeerClass, n
 		Limit:  n,
 	}
 	req.SetFromID(from)
-	for {
+	for attempt := 0; ; attempt++ {
 		res, err := api.MessagesSearch(ctx, req)
 		d, ok := tgerr.AsFloodWait(err)
-		if !ok || d > 30*time.Second {
+		if !ok || d > 30*time.Second || attempt >= maxFloodRetries {
 			return res, err
 		}
 		select {
