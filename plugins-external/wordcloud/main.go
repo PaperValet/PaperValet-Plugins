@@ -418,7 +418,14 @@ func (p *WordCloudPlugin) handle(ctx *plugin.CommandContext) error {
 	}
 	limit := defaultLimit
 	if sub != "" {
-		limit = parseLimitArg(sub)
+		n, err := strconv.Atoi(strings.TrimSpace(sub))
+		if err != nil || n <= 0 {
+			return ctx.Edit("❌ " + ctx.Tlocal(
+				"参数要是 50-2000 的数字，例如 ",
+				"The argument must be a number from 50 to 2000, e.g. ") +
+				plugin.Code("wordcloud 500"))
+		}
+		limit = clampLimit(n)
 	}
 	return p.cmdNow(ctx, limit)
 }
@@ -452,7 +459,13 @@ func (p *WordCloudPlugin) cmdSend(ctx *plugin.CommandContext) error {
 	}
 	limit := clampLimit(p.set.Int("schedule_limit"))
 	if a := ctx.GetArg(1); a != "" {
-		limit = parseLimitArg(a)
+		n, err := strconv.Atoi(strings.TrimSpace(a))
+		if err != nil || n <= 0 {
+			return ctx.Edit("❌ " + tl(
+				"参数要是 50-2000 的数字，例如 ",
+				"The argument must be a number from 50 to 2000, e.g. ") + plugin.Code("wordcloud send 500"))
+		}
+		limit = clampLimit(n)
 	}
 	_ = ctx.Edit(fmt.Sprintf(tl("⏳ 正在为 %s 生成词云…", "⏳ Generating the cloud for %s…"), plugin.Code(target)))
 	if err := p.generateAndSend(ctx.Context(), ctx.API, ctx.PeerResolver, target, limit, 0); err != nil {
@@ -479,8 +492,24 @@ func helpText(ctx *plugin.CommandContext) string {
 func (p *WordCloudPlugin) page(c *plugin.BotContext) (*plugin.View, error) {
 	tl := c.Tlocal
 	if c.Data == "run" {
-		c.Toast(tl("⏳ 正在生成…", "⏳ Generating…"))
-		go p.pageRun()
+		p.mu.Lock()
+		dup := false
+		for k := range p.running {
+			if strings.HasPrefix(k, "page:") {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			p.running["page:run"] = true
+		}
+		p.mu.Unlock()
+		if dup {
+			c.Toast(tl("⏳ 已有词云正在生成…", "⏳ A cloud is already generating…"))
+		} else {
+			c.Toast(tl("⏳ 正在生成…", "⏳ Generating…"))
+			go p.pageRun()
+		}
 	}
 	var b strings.Builder
 	b.WriteString("☁️ **" + tl("词云定时", "Word Cloud Schedule") + "**\n\n")
@@ -526,6 +555,11 @@ func (p *WordCloudPlugin) page(c *plugin.BotContext) (*plugin.View, error) {
 
 // pageRun generates for the schedule target and notifies the owner.
 func (p *WordCloudPlugin) pageRun() {
+	defer func() {
+		p.mu.Lock()
+		delete(p.running, "page:run")
+		p.mu.Unlock()
+	}()
 	if p.set == nil || p.host == nil {
 		return
 	}

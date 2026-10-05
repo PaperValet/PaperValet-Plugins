@@ -127,12 +127,3 @@ func clampLimit(n int) int {
 	}
 	return n
 }
-
-// parseLimitArg parses "500"-style args; 0/false → default.
-func parseLimitArg(s string) int {
-	n, err := strconv.Atoi(strings.TrimSpace(s))
-	if err != nil || n <= 0 {
-		return defaultLimit
-	}
-	return clampLimit(n)
-}

@@ -229,17 +229,37 @@ func TestNextFire(t *testing.T) {
 }
 
 func TestParseLimitArg(t *testing.T) {
+	// clampLimit bounds any positive count; parse errors are now rejected
+	// by the handler before this is reached.
 	cases := []struct {
-		in   string
+		in   int
 		want int
 	}{
-		{"", 500}, {"abc", 500}, {"0", 500}, {"-5", 500},
-		{"10", 50}, {"500", 500}, {"5000", 2000}, {"2000", 2000},
+		{0, 50}, {-5, 50}, {10, 50}, {500, 500}, {5000, 2000}, {2000, 2000},
 	}
 	for _, c := range cases {
-		if got := parseLimitArg(c.in); got != c.want {
-			t.Errorf("parseLimitArg(%q) = %d, want %d", c.in, got, c.want)
+		if got := clampLimit(c.in); got != c.want {
+			t.Errorf("clampLimit(%d) = %d, want %d", c.in, got, c.want)
 		}
+	}
+}
+
+// TestRepackTTCTruncatedHeader guards against the TTC header claiming more
+// fonts than the file holds (previously a slice-out-of-range panic).
+func TestRepackTTCTruncatedHeader(t *testing.T) {
+	// ttcf, version, numFonts=3 but only ~1.5 offset entries present.
+	src := append([]byte("ttcf\x00\x01\x00\x00\x00\x00\x00\x03"), make([]byte, 6)...)
+	if _, err := repackTTC(src, 2); err == nil {
+		t.Error("truncated offset table should fail, not panic")
+	}
+	if _, err := repackTTC(src, 1); err == nil {
+		t.Error("partially present entry should fail, not panic")
+	}
+	// single font with an offset far beyond EOF: rejected by the range check
+	src1 := append([]byte("ttcf\x00\x01\x00\x00\x00\x00\x00\x01"), 0xFF, 0xFF, 0xFF, 0xFF)
+	src1 = append(src1, make([]byte, 64)...)
+	if _, err := repackTTC(src1, 0); err == nil {
+		t.Error("offset beyond EOF should fail")
 	}
 }
 
@@ -265,6 +285,10 @@ func TestRepackTTCBadInput(t *testing.T) {
 // TestRenderSmoke renders a small cloud when the font exists (skipped
 // otherwise) and verifies the PNG decodes at 900x640.
 func TestRenderSmoke(t *testing.T) {
+	fontPath := resolveFontPath()
+	if fontPath == "" {
+		t.Skip("no CJK font installed")
+	}
 	if _, err := os.Stat(fontPath); err != nil {
 		t.Skip("font not installed")
 	}
@@ -310,6 +334,10 @@ func TestRenderSmoke(t *testing.T) {
 // TestLayoutPlacesWords checks the spiral layout stays inside the canvas
 // and placed boxes do not overlap.
 func TestLayoutPlacesWords(t *testing.T) {
+	fontPath := resolveFontPath()
+	if fontPath == "" {
+		t.Skip("no CJK font installed")
+	}
 	if _, err := os.Stat(fontPath); err != nil {
 		t.Skip("font not installed")
 	}

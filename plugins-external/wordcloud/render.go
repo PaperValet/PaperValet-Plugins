@@ -8,6 +8,7 @@ import (
 	"image/draw"
 	"image/png"
 	"math"
+	"os"
 	"sync"
 
 	"golang.org/x/image/font"
@@ -27,8 +28,7 @@ const (
 	titleColor = "#111827"
 	footerY    = imgHeight - 34
 
-	fontPath = "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"
-	fontDPI  = 72
+	fontDPI = 72
 
 	// spiral parameters (t is the step index)
 	spiralAngleStep  = 0.38
@@ -47,11 +47,33 @@ var palette = []string{
 	"#0f766e", "#166534", "#1d4ed8", "#0891b2", "#2563eb", "#ca8a04", "#dc2626", "#7c3aed",
 }
 
+// fontCandidates lists CJK font candidates probed in order; the first that
+// exists wins. wqy-zenhei is the reference font from the box spec; noto and
+// droid cover other common distros.
+var fontCandidates = []string{
+	"/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+	"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+	"/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+	"/usr/share/fonts/opentype/droid/DroidSansFallbackFull.tt",
+	"/usr/share/fonts/truetype/droid/DroidSansFallbackFull.tt",
+}
+
+// resolveFontPath returns the first installed CJK font.
+func resolveFontPath() string {
+	for _, p := range fontCandidates {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Size() > 1000 {
+			return p
+		}
+	}
+	return ""
+}
+
 // fontCache loads the CJK font once (sync.Once), repacked for sfnt (see
 // ttcfix.go), and caches one face per integer pixel size. A Face is not
 // safe for concurrent use, so every use goes through the cache mutex.
 type fontCache struct {
 	once  sync.Once
+	path  string
 	f     *opentype.Font
 	err   error
 	mu    sync.Mutex
@@ -62,14 +84,20 @@ var fonts fontCache
 
 func (f *fontCache) load() error {
 	f.once.Do(func() {
-		b, err := loadFontFile(fontPath)
+		p := resolveFontPath()
+		if p == "" {
+			f.err = fmt.Errorf("no CJK font found (tried %d paths; install fonts-wqy-zenhei or fonts-noto-cjk)", len(fontCandidates))
+			return
+		}
+		f.path = p
+		b, err := loadFontFile(p)
 		if err != nil {
-			f.err = fmt.Errorf("load font %s: %w", fontPath, err)
+			f.err = fmt.Errorf("load font %s: %w", p, err)
 			return
 		}
 		font, err := opentype.Parse(b)
 		if err != nil {
-			f.err = fmt.Errorf("parse font %s: %w", fontPath, err)
+			f.err = fmt.Errorf("parse font %s: %w", p, err)
 			return
 		}
 		f.f = font
@@ -223,8 +251,8 @@ func renderCloud(words []wordItem, limit, valid int) ([]byte, error) {
 			return nil, err
 		}
 	}
-	// footer caption: "最近 N 条热词云 | M 条有效消息"
-	title := fmt.Sprintf("最近 %d 条热词云 | %d 条有效消息", limit, valid)
+	// footer caption, bilingual so the exported image reads for both
+	title := fmt.Sprintf("最近 %d 条热词云 | %d 条有效消息 · last %d msgs, %d counted", limit, valid, limit, valid)
 	tc, err := parseHex(titleColor)
 	if err != nil {
 		return nil, err

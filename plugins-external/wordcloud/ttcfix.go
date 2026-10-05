@@ -25,6 +25,9 @@ func repackTTC(src []byte, fontIndex int) ([]byte, error) {
 		if fontIndex < 0 || fontIndex >= n {
 			return nil, fmt.Errorf("font collection has %d fonts, want %d", n, fontIndex)
 		}
+		if 12+4*fontIndex+4 > len(src) {
+			return nil, fmt.Errorf("font collection header truncated: %d fonts claimed, %d bytes", n, len(src))
+		}
 		offs := binary.BigEndian.Uint32(src[12+4*fontIndex:])
 		if int(offs)+12 > len(src) {
 			return nil, fmt.Errorf("bad font offset %d", offs)
