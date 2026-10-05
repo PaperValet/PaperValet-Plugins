@@ -35,6 +35,7 @@ External plugins for [PaperValet](https://github.com/PaperValet/PaperValet) · [
 | his | `his` | 查看某人在群里的发言记录 | List someone's recent messages in a group |
 | hitokoto | `hitokoto` | 随机一言 | Random quote |
 | ip | `ip` | 查询 IP 或域名的归属地 | Look up where an IP or domain lives |
+| keyword | `keyword` | 关键词自动回复，支持正则与冷却 | Auto-reply to keywords, regex and cooldowns |
 | listusernames | `listusernames` | 列出自己的公开群组和频道 | List your public groups and channels |
 | lottery | `lottery` | 群抽奖：报名、定时开奖 | Group lottery: join by keyword, scheduled draw |
 | luxiaoxunbs | `luxiaoxunbs` | 鲁小迅整点报时，每小时发贴纸时钟并撤回上一条 | Lu Xiaoxun hourly sticker clock, previous one auto-deleted |
