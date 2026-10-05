@@ -43,6 +43,7 @@ External plugins for [PaperValet](https://github.com/PaperValet/PaperValet) · [
 | luxiaoxunbs | `luxiaoxunbs` | 鲁小迅整点报时，每小时发贴纸时钟并撤回上一条 | Lu Xiaoxun hourly sticker clock, previous one auto-deleted |
 | music | `music` | 通过音乐机器人搜歌发歌，支持多平台和先搜后选 | Songs via music bots, multi-platform, search then pick |
 | news | `news` | 每日新闻、历史上的今天、成语和诗词 | Daily Chinese news digest |
+| pangu | `pangu` | 中英文之间加空格（盘古之白） | Space CJK and Latin text (pangu) |
 | paolu | `paolu` | 一键跑路：禁言全员并清空群消息 | Mute everyone and wipe the group history |
 | parsehub | `parsehub` | 解析链接并转发结果 | Parse links and forward the results |
 | pmcaptcha | `pmc` | 私信验证码门禁 | PM captcha gate |
