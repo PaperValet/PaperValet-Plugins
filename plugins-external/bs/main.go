@@ -452,6 +452,7 @@ func (p *BsPlugin) page(c *plugin.BotContext) (*plugin.View, error) {
 	if op, idStr, ok := strings.Cut(c.Data, ":"); ok {
 		id, err := strconv.Atoi(idStr)
 		if err == nil {
+			saved := true
 			p.mu.Lock()
 			for i, t := range p.db.Targets {
 				if t.ID != id {
@@ -465,10 +466,23 @@ func (p *BsPlugin) page(c *plugin.BotContext) (*plugin.View, error) {
 				case "on":
 					t.Disabled = false
 				}
-				_ = p.saveLocked()
+				if err := p.saveLocked(); err != nil {
+					saved = false
+					c.Alert("❌ " + tl("保存失败: ", "Save failed: ") + plugin.Code(err.Error()))
+				}
 				break
 			}
 			p.mu.Unlock()
+			if saved {
+				switch op {
+				case "rm":
+					c.Toast(fmt.Sprintf(tl("已删除 #%d", "deleted #%d"), id))
+				case "off":
+					c.Toast(fmt.Sprintf(tl("已禁用 #%d", "disabled #%d"), id))
+				case "on":
+					c.Toast(fmt.Sprintf(tl("已启用 #%d", "enabled #%d"), id))
+				}
+			}
 		}
 	}
 	return p.renderPage(tl), nil

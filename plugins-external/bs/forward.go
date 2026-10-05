@@ -208,17 +208,72 @@ func (p *BsPlugin) cmdForward(ctx *plugin.CommandContext) error {
 type forwardResult struct {
 	Target    *target
 	Display   string
-	Forwarded int // forwarded messages found in updates, 0 if unknown
-	FirstID   int // id of the first forwarded message, 0 if unknown
+	Forwarded int   // forwarded messages found in updates, 0 if unknown
+	FirstID   int   // id of the first forwarded message, 0 if unknown
+	NewIDs    []int // all new message ids, ascending (may be non-contiguous)
 	Peer      tg.InputPeerClass
 	TopicID   int
 }
+
+// fwdBatch is the per-request message cap for messages.forwardMessages; the
+// server rejects larger requests, so big escorts go out in chunks.
+const fwdBatch = 100
 
 // forwardTo forwards ids to one target. FLOOD_WAIT is retried once after
 // waiting; a second one aborts the whole run. CHAT_FORWARDS_RESTRICTED
 // aborts the run too. Permission errors are returned as plain errors so the
 // caller can skip to the next target.
 func (p *BsPlugin) forwardTo(ctx context.Context, api *tg.Client, resolver plugin.PeerResolver, selfID int64, fromPeer tg.InputPeerClass, t *target, ids []int) (*forwardResult, error) {
+	// call forwards all ids to peer in fwdBatch-sized chunks and returns
+	// the new message ids, sorted ascending.
+	call := func(peer tg.InputPeerClass) ([]int, error) {
+		var all []int
+		for base := 0; base < len(ids); base += fwdBatch {
+			end := base + fwdBatch
+			if end > len(ids) {
+				end = len(ids)
+			}
+			chunk := ids[base:end]
+			req := &tg.MessagesForwardMessagesRequest{
+				FromPeer: fromPeer,
+				ID:       chunk,
+				ToPeer:   peer,
+				RandomID: randomIDs(len(chunk)),
+			}
+			if t.TopicID > 0 {
+				req.SetTopMsgID(t.TopicID)
+			}
+			var res tg.UpdatesClass
+			var err error
+			for attempt := 0; ; attempt++ {
+				res, err = api.MessagesForwardMessages(ctx, req)
+				if err == nil {
+					break
+				}
+				if d, ok := tgerr.AsFloodWait(err); ok {
+					if attempt >= 1 {
+						return nil, fmt.Errorf("%w: %s", errFloodAbort, err.Error())
+					}
+					select {
+					case <-time.After(d + time.Second):
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+					continue
+				}
+				if tgerr.Is(err, "CHAT_FORWARDS_RESTRICTED") {
+					return nil, fmt.Errorf("%w: %s", errRestricted, err.Error())
+				}
+				if tgerr.Is(err, permissionErrs...) {
+					return nil, fmt.Errorf("no write permission: %s", err.Error())
+				}
+				return nil, err
+			}
+			all = append(all, forwardStats(res)...)
+		}
+		sort.Ints(all)
+		return all, nil
+	}
 	peer := t.Peer.input()
 	if peer == nil {
 		var err error
@@ -231,48 +286,46 @@ func (p *BsPlugin) forwardTo(ctx context.Context, api *tg.Client, resolver plugi
 		_ = p.saveLocked()
 		p.mu.Unlock()
 	}
-	req := &tg.MessagesForwardMessagesRequest{
-		FromPeer: fromPeer,
-		ID:       ids,
-		ToPeer:   peer,
-		RandomID: randomIDs(len(ids)),
-	}
-	if t.TopicID > 0 {
-		req.SetTopMsgID(t.TopicID)
-	}
-	var res tg.UpdatesClass
-	var err error
-	for attempt := 0; ; attempt++ {
-		res, err = api.MessagesForwardMessages(ctx, req)
-		if err == nil {
-			break
+	res, err := call(peer)
+	if err != nil && tgerr.Is(err, "PEER_ID_INVALID", "CHANNEL_INVALID", "USER_ID_INVALID") {
+		// The persisted access hash went stale (relogin, remote reset):
+		// drop it and resolve from the user-entered target once more.
+		p.mu.Lock()
+		stale := t.Peer != nil && t.Peer.AccessHash != 0
+		if stale {
+			t.Peer = nil
+			_ = p.saveLocked()
 		}
-		if d, ok := tgerr.AsFloodWait(err); ok {
-			if attempt >= 1 {
-				return nil, fmt.Errorf("%w: %s", errFloodAbort, err.Error())
+		p.mu.Unlock()
+		if stale {
+			if peer2, rerr := resolveTargetInput(ctx, resolver, selfID, t.Target); rerr == nil {
+				if ids2, cerr := call(peer2); cerr == nil {
+					p.mu.Lock()
+					t.Peer = refFromPeer(peer2)
+					_ = p.saveLocked()
+					p.mu.Unlock()
+					res, err = ids2, nil
+				} else {
+					res, err = nil, cerr
+				}
 			}
-			select {
-			case <-time.After(d + time.Second):
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-			continue
 		}
-		if tgerr.Is(err, "CHAT_FORWARDS_RESTRICTED") {
-			return nil, fmt.Errorf("%w: %s", errRestricted, err.Error())
-		}
-		if tgerr.Is(err, permissionErrs...) {
-			return nil, fmt.Errorf("no write permission: %s", err.Error())
-		}
+	}
+	if err != nil {
 		return nil, err
 	}
-	first, count := forwardStats(res)
-	return &forwardResult{Target: t, Display: t.Display, Forwarded: count, FirstID: first, Peer: peer, TopicID: t.TopicID}, nil
+	newIDs := res
+	first, count := 0, len(newIDs)
+	if count > 0 {
+		first = newIDs[0]
+	}
+	return &forwardResult{Target: t, Display: t.Display, Forwarded: count, FirstID: first, NewIDs: newIDs, Peer: peer, TopicID: t.TopicID}, nil
 }
 
-// forwardStats extracts the first and the count of new messages from a
-// forward Updates result.
-func forwardStats(u tg.UpdatesClass) (first, count int) {
+// forwardStats extracts the new message ids from a forward Updates result,
+// sorted ascending. The ids are not necessarily contiguous (topics, server
+// reordering), so callers must use the list instead of extrapolating.
+func forwardStats(u tg.UpdatesClass) []int {
 	var list []tg.UpdateClass
 	switch v := u.(type) {
 	case *tg.Updates:
@@ -295,11 +348,8 @@ func forwardStats(u tg.UpdatesClass) (first, count int) {
 			ids = append(ids, id)
 		}
 	}
-	if len(ids) == 0 {
-		return 0, 0
-	}
 	sort.Ints(ids)
-	return ids[0], len(ids)
+	return ids
 }
 
 // sendTargetFeedback replies under the first forwarded message in each
@@ -331,8 +381,7 @@ func (p *BsPlugin) sendTargetFeedback(ctx *plugin.CommandContext, fromPeer tg.In
 			b.WriteString(tl("原消息", "Original") + ": " + strings.Join(origTags, " ") + "\n")
 		}
 		var newTags []string
-		for i := range origIDs {
-			id := s.FirstID + i
+		for _, id := range s.NewIDs {
 			if l := chatLink(dstChatID, id); l != "" {
 				newTags = append(newTags, plugin.Link(fmt.Sprintf("#%d", id), l))
 			} else {

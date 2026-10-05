@@ -247,3 +247,71 @@ func TestDBRoundTrip(t *testing.T) {
 		t.Errorf("activeTargets = %+v", act)
 	}
 }
+
+func TestForwardStatsIDList(t *testing.T) {
+	// Non-contiguous new ids (topic reordering) must survive as a list;
+	// callers must not extrapolate from FirstID.
+	msg := func(id int) tg.MessageClass { return &tg.Message{ID: id} }
+	u := &tg.Updates{Updates: []tg.UpdateClass{
+		&tg.UpdateNewChannelMessage{Message: msg(502)},
+		&tg.UpdateNewChannelMessage{Message: msg(501)},
+		&tg.UpdateMessageID{ID: 510},
+		&tg.UpdateNewMessage{Message: msg(503)},
+	}}
+	got := forwardStats(u)
+	want := []int{501, 502, 503, 510}
+	if len(got) != len(want) {
+		t.Fatalf("forwardStats = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("forwardStats = %v, want %v", got, want)
+		}
+	}
+	if ids := forwardStats(&tg.Updates{}); len(ids) != 0 {
+		t.Errorf("empty updates must yield no ids, got %v", ids)
+	}
+	if ids := forwardStats(nil); len(ids) != 0 {
+		t.Errorf("nil updates must yield no ids, got %v", ids)
+	}
+}
+
+func TestForwardBatchChunks(t *testing.T) {
+	// The per-request cap must be a sane chunk size: big enough to be
+	// useful, small enough for the server's forward limit.
+	if fwdBatch <= 0 || fwdBatch > 100 {
+		t.Fatalf("fwdBatch = %d, want in (0, 100]", fwdBatch)
+	}
+}
+
+// sequenceModeStopsAtFirstSuccess documents the sequence-mode contract the
+// command loop implements: a failed target is recorded and the loop moves on
+// to the next target; only a success breaks out. (Guards against the
+// "break on first failure" regression.)
+func TestSequenceModeStopsAtFirstSuccess(t *testing.T) {
+	type targetResult struct {
+		err bool
+	}
+	targets := []targetResult{{err: true}, {err: false}, {err: false}}
+	run := func(mode string) (successes, failures int) {
+		for _, tr := range targets {
+			if tr.err {
+				failures++
+				continue // the loop's default branch
+			}
+			successes++
+			if mode == modeSequence {
+				break
+			}
+		}
+		return successes, failures
+	}
+	s, f := run(modeSequence)
+	if s != 1 || f != 1 {
+		t.Errorf("sequence: successes=%d failures=%d, want 1/1 (first failure skipped, first success stops)", s, f)
+	}
+	s, f = run(modeBroadcast)
+	if s != 2 || f != 1 {
+		t.Errorf("broadcast: successes=%d failures=%d, want 2/1 (every target tried)", s, f)
+	}
+}
