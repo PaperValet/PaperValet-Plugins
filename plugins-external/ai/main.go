@@ -110,7 +110,7 @@ func (p *AIPlugin) Init(_ context.Context, mgr plugin.Manager) error {
 	if err != nil {
 		return err
 	}
-	p.store = newHistoryStore(dir)
+	p.store = newHistoryStore(dir, p.host.Logger(p.Name()))
 	if err := p.store.load(); err != nil {
 		p.host.Logger(p.Name()).Warn("history load failed, starting fresh", "error", err)
 	}
@@ -123,6 +123,8 @@ func (p *AIPlugin) Init(_ context.Context, mgr plugin.Manager) error {
 		UsageEN:     "ai <question> · reply with ai · ai reset · ai help",
 		Plugin:      p.Name(),
 		Category:    "tools",
+		OwnerOnly:   true,
+		RateLimit:   30,
 		Handler:     p.handle,
 	})
 }
@@ -207,7 +209,7 @@ func (p *AIPlugin) handle(ctx *plugin.CommandContext) error {
 
 	answer, err := p.chat(ctx.Context(), cfg, trimTurns(hist, cfg.turns))
 	if err != nil {
-		p.store.rollbackUser(chatID)
+		p.store.rollbackUser(chatID, question)
 		return editNoPreview(ctx, errCard(ctx.Tlocal, err))
 	}
 	p.store.appendAssistant(chatID, answer)

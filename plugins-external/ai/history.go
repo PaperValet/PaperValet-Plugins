@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/TiaraBasori/PaperValet/pkg/plugin"
 )
 
 const (
@@ -18,13 +20,22 @@ const (
 type historyStore struct {
 	mu    sync.Mutex
 	path  string
+	log   plugin.Logger
 	chats map[int64][]turn
 }
 
-func newHistoryStore(dir string) *historyStore {
+func newHistoryStore(dir string, log plugin.Logger) *historyStore {
 	return &historyStore{
 		path:  filepath.Join(dir, historyFile),
+		log:   log,
 		chats: make(map[int64][]turn),
+	}
+}
+
+// persistLocked saves the store, logging (not swallowing) write failures.
+func (s *historyStore) persistLocked() {
+	if err := s.saveLocked(); err != nil && s.log != nil {
+		s.log.Warn("ai: persisting history failed", "error", err)
 	}
 }
 
@@ -85,7 +96,7 @@ func (s *historyStore) appendUser(chatID int64, question string) []turn {
 	if len(s.chats[chatID]) > storeCap {
 		s.chats[chatID] = s.chats[chatID][len(s.chats[chatID])-storeCap:]
 	}
-	_ = s.saveLocked()
+	s.persistLocked()
 	return s.chats[chatID]
 }
 
@@ -97,18 +108,23 @@ func (s *historyStore) appendAssistant(chatID int64, answer string) {
 	if len(s.chats[chatID]) > storeCap {
 		s.chats[chatID] = s.chats[chatID][len(s.chats[chatID])-storeCap:]
 	}
-	_ = s.saveLocked()
+	s.persistLocked()
 }
 
-// rollbackUser drops the trailing user turn after a failed request.
-func (s *historyStore) rollbackUser(chatID int64) {
+// rollbackUser drops the caller's user turn after a failed request. It
+// matches the question's content instead of blindly trimming the tail, so a
+// concurrent request's turn appended in between is never dropped.
+func (s *historyStore) rollbackUser(chatID int64, question string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	h := s.chats[chatID]
-	if len(h) > 0 && h[len(h)-1].Role == roleUser {
-		s.chats[chatID] = h[:len(h)-1]
+	for i := len(h) - 1; i >= 0; i-- {
+		if h[i].Role == roleUser && h[i].Text == question {
+			s.chats[chatID] = append(h[:i:i], h[i+1:]...)
+			s.persistLocked()
+			return
+		}
 	}
-	_ = s.saveLocked()
 }
 
 // reset clears a chat's history and reports how many messages were dropped.
@@ -117,7 +133,7 @@ func (s *historyStore) reset(chatID int64) int {
 	defer s.mu.Unlock()
 	n := len(s.chats[chatID])
 	delete(s.chats, chatID)
-	_ = s.saveLocked()
+	s.persistLocked()
 	return n
 }
 

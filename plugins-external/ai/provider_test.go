@@ -95,7 +95,10 @@ func TestGeminiChat(t *testing.T) {
 	var sawBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sawPath = r.URL.Path
-		sawKey = r.URL.Query().Get("key")
+		sawKey = r.Header.Get("x-goog-api-key")
+		if r.URL.Query().Get("key") != "" {
+			t.Errorf("key leaked into query string")
+		}
 		b, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(b, &sawBody)
 		_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"hello "},{"text":"there"}]}}]}`))

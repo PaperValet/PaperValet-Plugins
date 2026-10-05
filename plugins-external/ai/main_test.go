@@ -68,19 +68,19 @@ func TestTrimTurns(t *testing.T) {
 
 func TestHistoryStoreRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	s := newHistoryStore(dir)
+	s := newHistoryStore(dir, nil)
 	if err := s.load(); err != nil {
 		t.Fatal(err)
 	}
 	s.appendUser(1, "hi")
 	s.appendAssistant(1, "hello")
 	s.appendUser(2, "other")
-	s.rollbackUser(2)
+	s.rollbackUser(2, "other")
 	if n := len(s.history(2, 5)); n != 0 {
 		t.Fatalf("chat 2 should be empty after rollback, got %d", n)
 	}
 
-	again := newHistoryStore(dir)
+	again := newHistoryStore(dir, nil)
 	if err := again.load(); err != nil {
 		t.Fatal(err)
 	}
@@ -100,11 +100,35 @@ func TestHistoryStoreRoundTrip(t *testing.T) {
 }
 
 func TestHistoryStoreCap(t *testing.T) {
-	s := newHistoryStore(t.TempDir())
+	s := newHistoryStore(t.TempDir(), nil)
 	for i := 0; i < storeCap+20; i++ {
 		s.appendUser(7, "x")
 	}
 	if n := len(s.appendUser(7, "y")); n != storeCap {
 		t.Fatalf("store should cap at %d, got %d", storeCap, n)
+	}
+}
+
+// A failing request must roll back only its own turn: when request B's user
+// turn was appended after A's, A's rollback may not touch B's.
+func TestRollbackUserMatchesContent(t *testing.T) {
+	s := newHistoryStore(t.TempDir(), nil)
+	s.appendUser(1, "question A")
+	s.appendUser(1, "question B") // concurrent request B got in first
+	s.rollbackUser(1, "question A")
+	h := s.history(1, 10)
+	if len(h) != 1 || h[0].Text != "question B" {
+		t.Fatalf("B's turn must survive A's rollback, got %v", h)
+	}
+	// rolling back the newest turn removes it
+	s.rollbackUser(1, "question B")
+	if h := s.history(1, 10); len(h) != 0 {
+		t.Fatalf("expected empty, got %v", h)
+	}
+	// a question that is not in the store changes nothing
+	s.appendUser(1, "keep")
+	s.rollbackUser(1, "never asked")
+	if h := s.history(1, 10); len(h) != 1 || h[0].Text != "keep" {
+		t.Fatalf("unrelated rollback must not alter history, got %v", h)
 	}
 }

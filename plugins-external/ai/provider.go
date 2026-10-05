@@ -195,10 +195,12 @@ func extractProviderError(raw []byte) string {
 	return strings.TrimSpace(string(raw))
 }
 
-// geminiChat posts a generateContent request with systemInstruction.
+// geminiChat posts a generateContent request with systemInstruction. The key
+// travels in the x-goog-api-key header, not the query string, so it stays out
+// of proxy and server access logs.
 func geminiChat(ctx context.Context, client *http.Client, cfg chatConfig, hist []turn) (string, error) {
 	base := strings.TrimRight(cfg.baseURL, "/")
-	endpoint := base + "/models/" + url.PathEscape(cfg.model) + ":generateContent?key=" + url.QueryEscape(cfg.apiKey)
+	endpoint := base + "/models/" + url.PathEscape(cfg.model) + ":generateContent"
 
 	contents := make([]map[string]any, 0, len(hist))
 	for _, t := range hist {
@@ -223,6 +225,7 @@ func geminiChat(ctx context.Context, client *http.Client, cfg chatConfig, hist [
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", cfg.apiKey)
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
