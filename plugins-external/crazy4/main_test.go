@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/gotd/td/tg"
 )
 
 func TestTexts(t *testing.T) {
@@ -39,5 +41,31 @@ func TestDeckNoRepeat(t *testing.T) {
 		if len(got) != 3 {
 			t.Fatalf("round %d not a full cycle: %v", round, got)
 		}
+	}
+}
+
+func TestRealReplyID(t *testing.T) {
+	// Plain reply passes through.
+	plain := &tg.Message{ReplyTo: &tg.MessageReplyHeader{ReplyToMsgID: 7}}
+	if got := realReplyID(plain); got != 7 {
+		t.Errorf("plain reply = %d, want 7", got)
+	}
+	// A message inside a forum topic that only carries the implicit
+	// reply-to-topic-root header is not a reply.
+	root := &tg.Message{ReplyTo: &tg.MessageReplyHeader{ForumTopic: true, ReplyToMsgID: 3}}
+	if got := realReplyID(root); got != 0 {
+		t.Errorf("topic root header = %d, want 0", got)
+	}
+	// A real reply inside a topic keeps its target.
+	inTopic := &tg.MessageReplyHeader{ForumTopic: true, ReplyToMsgID: 9}
+	inTopic.SetReplyToTopID(3)
+	if got := realReplyID(&tg.Message{ReplyTo: inTopic}); got != 9 {
+		t.Errorf("reply in topic = %d, want 9", got)
+	}
+	if got := realReplyID(&tg.Message{}); got != 0 {
+		t.Errorf("no reply = %d, want 0", got)
+	}
+	if got := realReplyID(nil); got != 0 {
+		t.Errorf("nil message = %d, want 0", got)
 	}
 }

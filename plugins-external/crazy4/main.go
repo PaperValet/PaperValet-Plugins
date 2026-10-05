@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/gotd/td/tg"
+
 	"github.com/TiaraBasori/PaperValet/pkg/plugin"
 )
 
@@ -62,14 +64,31 @@ func (p *Crazy4Plugin) handle(ctx *plugin.CommandContext) error {
 			"🍗 **疯狂星期四**\n\n"+plugin.Code("crazy4")+" 随机发一条文案，命令消息会被删掉\n回复别人时发，文案也回复那条消息",
 			"🍗 **Crazy Thursday**\n\n"+plugin.Code("crazy4")+" posts a random copypasta (Chinese) and deletes the command\nSend it as a reply and the copypasta replies to the same message"))
 	}
-	replyTo := 0
-	if ctx.Message.IsReply {
-		replyTo = ctx.Message.ReplyToID
-	}
+	replyTo := realReplyID(ctx.Message.Message)
 	if _, err := p.host.Send(ctx.Context(), ctx.Message.ChatID, plugin.Escape(p.deck.next()), replyTo); err != nil {
 		return ctx.Edit("❌ " + ctx.Tlocal("发送失败：", "Send failed: ") + plugin.Escape(err.Error()))
 	}
 	return ctx.Delete()
+}
+
+// realReplyID returns the replied message id, ignoring the implicit
+// reply-to-topic-root header every forum topic message carries (that
+// header is not a real reply; the copypasta would otherwise attach to the
+// topic's creation message).
+func realReplyID(msg *tg.Message) int {
+	if msg == nil {
+		return 0
+	}
+	h, ok := msg.ReplyTo.(*tg.MessageReplyHeader)
+	if !ok || h.ReplyToMsgID == 0 {
+		return 0
+	}
+	if h.ForumTopic {
+		if _, has := h.GetReplyToTopID(); !has {
+			return 0
+		}
+	}
+	return h.ReplyToMsgID
 }
 
 // deck hands out texts in shuffled order so nothing repeats until every
