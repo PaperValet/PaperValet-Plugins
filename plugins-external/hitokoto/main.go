@@ -17,7 +17,7 @@ import (
 
 const (
 	apiURL     = "https://v1.hitokoto.cn/"
-	maxRetries = 10 // as in the reference
+	maxRetries = 3 // only transport/429/5xx are retried, so keep it small
 	retryDelay = time.Second
 )
 
@@ -83,6 +83,7 @@ func (p *HitokotoPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 		UsageEN:     "hitokoto [types a-l …] | hitokoto help",
 		Plugin:      p.Name(),
 		Category:    "fun",
+		RateLimit:   3,
 		Handler:     p.handleHitokoto,
 	})
 }
@@ -190,6 +191,10 @@ func (p *HitokotoPlugin) handleHitokoto(ctx *plugin.CommandContext) error {
 		}
 	}
 	types, invalid := parseTypes(ctx.Args)
+	if len(types) == 0 && len(invalid) == 0 {
+		// No types on the command line: fall back to the panel default.
+		types, _ = parseTypes(strings.Fields(p.set.String("type")))
+	}
 	if len(invalid) > 0 && len(types) == 0 {
 		return ctx.Edit("❌ " + ctx.Tlocal("无效类型：", "Invalid type: ") + plugin.Code(strings.Join(invalid, " ")) +
 			"\n\n💡 " + ctx.Tlocal("可选类型 a-l，发送 ", "Valid types are a-l, send ") + plugin.Code("hitokoto help"))
@@ -224,12 +229,30 @@ func (p *HitokotoPlugin) fetch(ctx context.Context, types []string) (*hitokotoRe
 			return data, nil
 		}
 		lastErr = err
+		if !retryable(err) {
+			return nil, lastErr
+		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 	}
 	return nil, lastErr
 }
+
+// retryable reports whether another attempt can help: transport errors,
+// 429 and 5xx. Anything else (403/404, bad payloads) fails fast.
+func retryable(err error) bool {
+	var se *statusCodeError
+	if errors.As(err, &se) {
+		return se.code == http.StatusTooManyRequests || se.code >= 500
+	}
+	return true // transport / JSON error
+}
+
+// statusCodeError marks a non-200 HTTP reply.
+type statusCodeError struct{ code int }
+
+func (e *statusCodeError) Error() string { return fmt.Sprintf("HTTP %d", e.code) }
 
 func (p *HitokotoPlugin) once(ctx context.Context, u string) (*hitokotoResp, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
@@ -243,7 +266,7 @@ func (p *HitokotoPlugin) once(ctx context.Context, u string) (*hitokotoResp, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+		return nil, &statusCodeError{code: resp.StatusCode}
 	}
 	var data hitokotoResp
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&data); err != nil {
