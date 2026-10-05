@@ -33,6 +33,7 @@ External plugins for [PaperValet](https://github.com/PaperValet/PaperValet) · [
 | hitokoto | `hitokoto` | 随机一言 | Random quote |
 | ip | `ip` | 查询 IP 或域名的归属地 | Look up where an IP or domain lives |
 | listusernames | `listusernames` | 列出自己的公开群组和频道 | List your public groups and channels |
+| lottery | `lottery` | 群抽奖：报名、定时开奖 | Group lottery: join by keyword, scheduled draw |
 | luxiaoxunbs | `luxiaoxunbs` | 鲁小迅整点报时，每小时发贴纸时钟并撤回上一条 | Lu Xiaoxun hourly sticker clock, previous one auto-deleted |
 | music | `music` | 通过音乐机器人搜歌发歌，支持多平台和先搜后选 | Songs via music bots, multi-platform, search then pick |
 | news | `news` | 每日新闻、历史上的今天、成语和诗词 | Daily Chinese news digest |
