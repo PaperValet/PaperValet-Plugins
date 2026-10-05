@@ -249,7 +249,7 @@ func (p *SetuPlugin) handle(ctx *plugin.CommandContext) error {
 		}
 		return ctx.Edit("❌ " + ctx.Tlocal("机器人没有返回图片，请稍后重试", "The bot sent no image, try again later"))
 	}
-	if err := p.sendMedia(ctx, res.Media, replyTo); err != nil {
+	if err := p.sendMedia(ctx, res.Media, replyTo, res.lastID); err != nil {
 		return ctx.Edit("❌ " + p.errText(ctx.Tlocal, err))
 	}
 	if p.set.Bool("delete_cmd") {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -142,17 +143,33 @@ func TestWaitReply(t *testing.T) {
 		t.Fatalf("error text: %+v %v", res, err)
 	}
 
-	// progress text is kept; on timeout it is shown
+	// image mode: progress text followed by timeout is NOT a success — the
+	// progress text ("searching…") must not be reported as the bot's answer
 	events = make(chan *tg.Message, 8)
 	go func() {
 		events <- &tg.Message{ID: 3, Message: "正在搜索..."}
-		time.Sleep(60 * time.Millisecond)
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
 	res, err = p.waitReply(ctx, events, 1, false)
-	if err != nil || res == nil || res.Text != "正在搜索..." {
-		t.Fatalf("last text: %+v %v", res, err)
+	if err == nil || res != nil {
+		t.Fatalf("progress text on timeout must fail, got %+v %v", res, err)
+	}
+	if !errors.Is(err, errNoReply) {
+		t.Fatalf("want errNoReply, got %v", err)
+	}
+
+	// check-in: progress text followed by timeout keeps the last text as
+	// the result (any reply is the answer for the check-in)
+	events = make(chan *tg.Message, 8)
+	go func() {
+		events <- &tg.Message{ID: 3, Message: "签到处理中..."}
+	}()
+	ctx3, cancel3 := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel3()
+	res, err = p.waitReply(ctx3, events, 1, true)
+	if err != nil || res == nil || res.Text != "签到处理中..." {
+		t.Fatalf("checkin last text: %+v %v", res, err)
 	}
 
 	// timeout without any text is an error

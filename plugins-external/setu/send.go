@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
-	"time"
 
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
@@ -20,7 +19,7 @@ import (
 
 // sendMedia re-sends the bot's photo or document by reference into the
 // command chat.
-func (p *SetuPlugin) sendMedia(ctx *plugin.CommandContext, media tg.MessageMediaClass, replyTo int) error {
+func (p *SetuPlugin) sendMedia(ctx *plugin.CommandContext, media tg.MessageMediaClass, replyTo, lastID int) error {
 	var input tg.InputMediaClass
 	spoiler := p.set.Bool("spoiler")
 	switch m := media.(type) {
@@ -70,9 +69,10 @@ func (p *SetuPlugin) sendMedia(ctx *plugin.CommandContext, media tg.MessageMedia
 	}
 
 	// Mark the bot conversation read, like the source (best effort).
-	if peer, err := p.botPeer(ctx.Context()); err == nil {
+	// MaxID is a message id, not a timestamp.
+	if peer, err := p.botPeer(ctx.Context()); err == nil && lastID > 0 {
 		_, _ = ctx.API.MessagesReadHistory(ctx.Context(), &tg.MessagesReadHistoryRequest{
-			Peer: peer, MaxID: int(time.Now().Unix()),
+			Peer: peer, MaxID: lastID,
 		})
 	}
 	return nil

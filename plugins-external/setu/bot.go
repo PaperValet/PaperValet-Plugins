@@ -19,8 +19,9 @@ var errNoReply = errors.New("no reply")
 
 // botReply is the classified answer of the bot.
 type botReply struct {
-	Media tg.MessageMediaClass // photo or document, nil for text replies
-	Text  string               // last text seen (error or check-in result)
+	Media  tg.MessageMediaClass // photo or document, nil for text replies
+	Text   string               // last text seen (error or check-in result)
+	lastID int                  // newest bot message id seen (for read marking)
 }
 
 // askBot runs one command round-trip with the image bot.
@@ -62,30 +63,35 @@ func (p *SetuPlugin) askBot(cat *category) (*botReply, error) {
 // waitReply accepts only messages newer than after. For image commands a
 // photo or document finishes the wait; error keywords fail it; other texts
 // (progress notes like "searching…") are kept and the wait goes on. For the
-// check-in any reply is the result.
+// check-in any reply is the result. On timeout the last progress text is NOT
+// a result — it goes through errNoReply like a silent bot.
 func (p *SetuPlugin) waitReply(ctx context.Context, events <-chan *tg.Message, after int, anyText bool) (*botReply, error) {
 	last := ""
+	maxID := after
 	for {
 		select {
 		case <-ctx.Done():
-			if last != "" {
-				return &botReply{Text: last}, nil
+			if anyText && last != "" {
+				return &botReply{Text: last, lastID: maxID}, nil
 			}
 			return nil, errNoReply
 		case m := <-events:
 			if m.ID <= after {
 				continue // stale message from before our command
 			}
+			if m.ID > maxID {
+				maxID = m.ID
+			}
 			if m.Media != nil {
 				if _, empty := m.Media.(*tg.MessageMediaEmpty); !empty {
-					return &botReply{Media: m.Media, Text: m.Message}, nil
+					return &botReply{Media: m.Media, Text: m.Message, lastID: m.ID}, nil
 				}
 			}
 			txt := strings.TrimSpace(m.Message)
 			if txt != "" {
 				last = txt
 				if anyText || isBotError(txt) {
-					return &botReply{Text: txt}, nil
+					return &botReply{Text: txt, lastID: m.ID}, nil
 				}
 			}
 		}
