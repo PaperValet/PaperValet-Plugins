@@ -113,10 +113,17 @@ func (p *TeletypePlugin) lifetime() context.Context {
 	return p.ctx
 }
 
-func (p *TeletypePlugin) running() bool {
+// begin registers an animation worker under mu. wg.Add must never race
+// Stop's wg.Wait: a Wait that observes zero while an Add is in flight would
+// let an untracked goroutine keep editing with a dead lifetime context.
+func (p *TeletypePlugin) begin() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.cancel != nil
+	if p.cancel == nil {
+		return false
+	}
+	p.wg.Add(1)
+	return true
 }
 
 func (p *TeletypePlugin) help(ctx *plugin.CommandContext) string {
@@ -129,7 +136,7 @@ func (p *TeletypePlugin) help(ctx *plugin.CommandContext) string {
 			"**设置**（机器人面板）\n"+
 			"自动模式：给自己发出的普通消息自动加效果\n"+
 			"打字速度：每字停顿，默认 50ms\n\n"+
-			"💡 文本最长 200 字符",
+			"💡 文本最长 200 字符；动画过程中手动编辑那条消息会被后续帧覆盖",
 		"⌨️ **Typewriter**\n\n"+
 			"**Usage**\n"+
 			plugin.Code("teletype <text>")+" retype this command message character by character (with a █ cursor)\n"+
@@ -138,7 +145,7 @@ func (p *TeletypePlugin) help(ctx *plugin.CommandContext) string {
 			"**Settings** (bot panel)\n"+
 			"Auto mode: apply the effect to your own plain messages\n"+
 			"Typing speed: pause per character, 50ms by default\n\n"+
-			"💡 Text is capped at 200 characters")
+			"💡 Text is capped at 200 characters; manual edits to the message are overwritten while the animation runs")
 }
 
 func (p *TeletypePlugin) handle(ctx *plugin.CommandContext) error {
@@ -161,9 +168,6 @@ func (p *TeletypePlugin) handle(ctx *plugin.CommandContext) error {
 	if tooLong(text) {
 		return ctx.Edit("❌ " + ctx.Tlocal("文本过长，最多 200 字符。", "Text too long, 200 characters max."))
 	}
-	if !p.running() {
-		return ctx.Edit("❌ " + ctx.Tlocal("插件未运行。", "Plugin is not running."))
-	}
 
 	// Handlers run on the update path: animate in the background, keep the
 	// message id and peer so the edits survive the handler's context.
@@ -174,43 +178,82 @@ func (p *TeletypePlugin) handle(ctx *plugin.CommandContext) error {
 		return fmt.Errorf("teletype: resolve peer: %w", err)
 	}
 	msgID := ev.Message.ID
-	p.wg.Add(1)
+	if !p.begin() {
+		return ctx.Edit("❌ " + ctx.Tlocal("插件未运行。", "Plugin is not running."))
+	}
 	go func() {
 		defer p.wg.Done()
-		if err := p.animate(p.lifetime(), api, peer, msgID, text, interval); err != nil {
+		ed := func(ctx context.Context, md string) error {
+			return editMessage(ctx, api, peer, msgID, md)
+		}
+		if err := p.animate(p.lifetime(), ed, text, interval); err != nil {
 			p.log.Warn("teletype: animation failed", "error", err)
 		}
 	}()
 	return nil
 }
 
-// animate replays the message through the frame sequence. Edits happen
-// strictly in order; MESSAGE_NOT_MODIFIED is not an error (the source
-// ignores it too), everything else aborts the run.
-func (p *TeletypePlugin) animate(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, msgID int, text string, interval time.Duration) error {
-	fr := steps(text)
+// animate replays the message through the frame sequence.
+func (p *TeletypePlugin) animate(ctx context.Context, ed editFunc, text string, interval time.Duration) error {
+	return runFrames(ctx, ed, steps(text), interval, sleepCtx)
+}
+
+// editFunc applies one Markdown frame to the message.
+type editFunc func(ctx context.Context, md string) error
+
+// runFrames replays the frames in order, waiting out short FLOOD_WAITs
+// within a bounded budget (a 200-rune text is up to 400 edits; the first
+// flood must not strand the message half-typed). If a frame cannot land at
+// all, the message is closed out with the complete text so no run ends on a
+// partial line with a dangling cursor. MESSAGE_NOT_MODIFIED is not an error
+// (the source ignores it too).
+func runFrames(ctx context.Context, ed editFunc, fr []frame, interval time.Duration, sleep func(context.Context, time.Duration) error) error {
+	final := frameMD(fr[len(fr)-1])
+	flood := 0
 	last := ""
 	for i, f := range fr {
 		md := frameMD(f)
 		if md == last {
 			continue // Telegram rejects no-op edits
 		}
-		if err := editMessage(ctx, api, peer, msgID, md); err != nil {
+		if err := editFrame(ctx, ed, md, &flood, sleep); err != nil {
 			if tgerr.Is(err, "MESSAGE_NOT_MODIFIED") {
-				continue
+				last = md
+			} else {
+				if ctx.Err() == nil {
+					_ = editFrame(ctx, ed, final, &flood, sleep)
+				}
+				return err
 			}
-			return err
+		} else {
+			last = md
 		}
-		last = md
 		if i < len(fr)-1 {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(interval):
+			if err := sleep(ctx, interval); err != nil {
+				return err
 			}
 		}
 	}
 	return nil
+}
+
+// editFrame applies one frame edit, retrying the same frame after short
+// FLOOD_WAITs. Longer waits or an exhausted budget return the error.
+func editFrame(ctx context.Context, ed editFunc, md string, flood *int, sleep func(context.Context, time.Duration) error) error {
+	for {
+		err := ed(ctx, md)
+		if err == nil || tgerr.Is(err, "MESSAGE_NOT_MODIFIED") {
+			return err
+		}
+		d, ok := tgerr.AsFloodWait(err)
+		if !ok || d > maxFloodWait || *flood >= floodBudget {
+			return err
+		}
+		*flood++
+		if err := sleep(ctx, d+time.Second); err != nil {
+			return err
+		}
+	}
 }
 
 // editMessage replaces a message's text, parsing Markdown so the cursor
@@ -249,21 +292,28 @@ func (p *TeletypePlugin) onMessage(_ context.Context, ev *plugin.MessageEvent, e
 	if !autoPick(sig, p.host.Prefixes()) {
 		return
 	}
-	if tooLong(ev.Text) || !p.running() {
+	if tooLong(ev.Text) {
 		return
 	}
-	peer, err := p.host.PeerResolver().ResolveFromChatID(context.Background(), ev.ChatID)
-	if err != nil {
-		p.log.Debug("teletype: resolve failed", "chat", ev.ChatID, "error", err)
+	text, chatID, msgID := ev.Text, ev.ChatID, ev.Message.ID
+	if !p.begin() {
 		return
 	}
-	api := p.host.API()
-	interval := intervalMs(p.set.String("speed"))
-	msgID := ev.Message.ID
-	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
-		if err := p.animate(p.lifetime(), api, peer, msgID, ev.Text, interval); err != nil {
+		// Resolve on the worker, never on the update path: a cache miss
+		// must not stall update dispatch.
+		ctx := p.lifetime()
+		peer, err := p.host.PeerResolver().ResolveFromChatID(ctx, chatID)
+		if err != nil {
+			p.log.Debug("teletype: resolve failed", "chat", chatID, "error", err)
+			return
+		}
+		api := p.host.API()
+		ed := func(ctx context.Context, md string) error {
+			return editMessage(ctx, api, peer, msgID, md)
+		}
+		if err := runFrames(ctx, ed, steps(text), intervalMs(p.set.String("speed")), sleepCtx); err != nil {
 			p.log.Debug("teletype: auto animation failed", "error", err)
 		}
 	}()

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"strconv"
 	"strings"
 	"time"
@@ -18,7 +19,25 @@ const (
 	baseInterval = 50 * time.Millisecond
 	// minInterval keeps a mistyped speed setting from spamming edits.
 	minInterval = 10 * time.Millisecond
+	// maxFloodWait is the longest FLOOD_WAIT one animation will sleep out
+	// before giving up (and closing the message out with the full text).
+	maxFloodWait = 30 * time.Second
+	// floodBudget caps the total number of flood-sleep retries per run so
+	// a heavily throttled account cannot keep an animation alive forever.
+	floodBudget = 6
 )
+
+// sleepCtx waits for d or until ctx ends.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
 
 // frame is one visible state of the message during the animation.
 type frame struct {
