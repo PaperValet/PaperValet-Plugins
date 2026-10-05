@@ -100,6 +100,28 @@ func TestSplitPrefix(t *testing.T) {
 	}
 }
 
+func TestParseSetArgs(t *testing.T) {
+	cases := []struct {
+		args   []string
+		sec    int
+		global bool
+	}{
+		{[]string{"30s"}, 30, false},
+		{[]string{"30", "seconds"}, 30, false},
+		{[]string{"5", "分钟", "global"}, 300, true},
+		{[]string{"global", "1d"}, 86400, true},
+		{[]string{"GLOBAL", "2h"}, 7200, true},
+		{[]string{"help"}, 0, false},
+		{[]string{}, 0, false},
+	}
+	for _, c := range cases {
+		sec, global := parseSetArgs(c.args)
+		if sec != c.sec || global != c.global {
+			t.Errorf("parseSetArgs(%q) = %d,%v want %d,%v", c.args, sec, global, c.sec, c.global)
+		}
+	}
+}
+
 func TestPrunePending(t *testing.T) {
 	now := time.Now()
 	list := []PendingDel{

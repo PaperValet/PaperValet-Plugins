@@ -27,24 +27,26 @@ func (p *AutoDelPlugin) handle(ctx *plugin.CommandContext) error {
 	if sub == "cmd" {
 		return p.cmdRule(ctx, ctx.Args[1:])
 	}
-	// default: try to parse a duration from the joined args (supports
-	// "autodel 5 分钟" and "autodel 30s global")
-	raw := strings.Join(ctx.Args, " ")
-	global := false
-	sec := 0
-	for _, f := range strings.Fields(raw) {
-		if strings.EqualFold(f, "global") {
-			global = true
-			continue
-		}
-		if sec == 0 {
-			sec = parseDuration(f)
-		}
-	}
+	// default: a duration (any spacing) plus an optional "global" token
+	sec, global := parseSetArgs(ctx.Args)
 	if sec == 0 {
 		return ctx.Edit(helpText(ctx))
 	}
 	return p.cmdSetTTL(ctx, sec, global)
+}
+
+// parseSetArgs extracts the TTL and the global flag from `autodel …` args.
+// Tokens are joined so "30 seconds" and "5 分钟" parse like "30seconds"/"5分钟".
+func parseSetArgs(args []string) (sec int, global bool) {
+	var keep []string
+	for _, a := range args {
+		if strings.EqualFold(a, "global") {
+			global = true
+			continue
+		}
+		keep = append(keep, a)
+	}
+	return parseDuration(strings.Join(keep, " ")), global
 }
 
 // cmdSetTTL stores the TTL for this chat (or the global entry).
@@ -249,6 +251,15 @@ func (p *AutoDelPlugin) cmdRuleAdd(ctx *plugin.CommandContext, args []string) er
 				merged = true
 				rule = *r
 				break
+			}
+		}
+		if !merged {
+			// an identical existing rule (same key, delay and flags) is reused
+			for _, r := range p.rules {
+				if ruleKey(r) == ruleKey(rule) && r.Delay == delay && r.DeleteResponse == resp {
+					rule, merged = r, true
+					break
+				}
 			}
 		}
 		if !merged {
