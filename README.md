@@ -23,6 +23,7 @@ External plugins for [PaperValet](https://github.com/PaperValet/PaperValet) · [
 | atadmins | `atadmins` | 一键艾特全部管理员 | Mention every group admin |
 | autochangename | `autochangename` | 自动轮换账号名字/简介 | Auto-rotate the account name or bio |
 | ban | `ban` · `unban` · `kick` · `mute` · `unmute` · `sb` · `unsb` · `refresh` | 封禁、踢出、禁言与跨群批量封禁 | Ban, kick, mute and cross-group batch bans |
+| bgp | `bgp` | 查询 IP/ASN/前缀的 BGP 路由信息 | BGP routing info for an IP/ASN/prefix |
 | bizhi | `bizhi` | 随机高清壁纸 | Random wallpaper |
 | checkin | `checkin` | 每日自动签到：定时向目标机器人发送签到命令并点击签到按钮 | Daily auto check-in: sends sign-in commands to target bots on schedule and clicks buttons |
 | cosplay | `cosplay` · `cos` | 随机 Cosplay 图片 | Random cosplay photos |
