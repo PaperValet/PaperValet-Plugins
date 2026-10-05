@@ -24,7 +24,10 @@ import (
 
 const (
 	downloadTimeout = 30 * time.Second // per image, per mirror (like the source)
-	dlConcurrency   = 3
+	// downloadAllTimeout bounds the whole batch: 10 images × 4 mirrors ×
+	// 30s each would be minutes in the worst case.
+	downloadAllTimeout = 3 * time.Minute
+	dlConcurrency      = 3
 )
 
 // proxyHosts are the download mirrors, in panel order. i.pximg.net is
@@ -186,6 +189,12 @@ func (p *ZprPlugin) downloadAll(ctx context.Context, items []setuItem, preferred
 	if preferred == "" {
 		preferred = defaultProxy
 	}
+	// Overall budget: with per-image mirror fallbacks the worst case is
+	// minutes; cap the whole batch so the user is not stuck on progress
+	// text forever.
+	dctx, cancel := context.WithTimeout(ctx, downloadAllTimeout)
+	defer cancel()
+	ctx = dctx
 	dir := p.dataDir()
 	if err := os.MkdirAll(filepath.Join(dir, "tmp"), 0o755); err != nil {
 		return nil, fmt.Errorf("tmp dir: %w", err)
@@ -315,18 +324,33 @@ func (p *ZprPlugin) downloadVia(ctx context.Context, u, host string, item setuIt
 }
 
 // urlExt picks the file extension: the API's ext field, else the URL path,
-// else jpg (the source's default).
+// else jpg (the source's default). Anything that could escape the temp dir
+// (path separators, ..) is stripped: the value comes from a remote API.
 func urlExt(u, fallback string) string {
-	if e := strings.TrimPrefix(strings.ToLower(fallback), "."); e != "" {
+	e := strings.TrimLeft(strings.ToLower(fallback), ".")
+	e = pathExtSegment(e)
+	if e != "" {
 		return e
 	}
 	if sep := strings.IndexAny(u, "?#"); sep >= 0 {
 		u = u[:sep]
 	}
-	if e := strings.TrimPrefix(strings.ToLower(filepath.Ext(u)), "."); e != "" {
+	if e := pathExtSegment(strings.TrimPrefix(strings.ToLower(filepath.Ext(u)), ".")); e != "" {
 		return e
 	}
 	return "jpg"
+}
+
+// pathExtSegment reduces a candidate extension to plain characters, dropping
+// anything containing separators or traversal dots entirely.
+func pathExtSegment(e string) string {
+	if e == "" || strings.ContainsAny(e, "/\\") || strings.Contains(e, "..") {
+		return ""
+	}
+	if len(e) > 10 { // not a plausible extension; ignore the value
+		return ""
+	}
+	return e
 }
 
 // maybeSwitchProxy persists the best-performing mirror when the configured

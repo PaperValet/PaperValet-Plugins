@@ -226,6 +226,19 @@ func TestURLExt(t *testing.T) {
 	}
 }
 
+// A hostile ext field from the API must never carry path separators or
+// traversal out of the temp dir; the URL fallback (or jpg) is used instead.
+func TestURLExtSanitizesPathCharacters(t *testing.T) {
+	for _, fb := range []string{"../../x", "..", "a/b", `a\b`, "png/../x", "verylongextensionvalue"} {
+		if got := urlExt("https://x/a.jpg", fb); got != "jpg" {
+			t.Errorf("urlExt fallback %q = %q, want jpg", fb, got)
+		}
+	}
+	if got := urlExt("https://x/a.png?x=1", "../evil"); got != "png" {
+		t.Errorf("urlExt with hostile fallback and URL ext = %q, want png", got)
+	}
+}
+
 func TestAtoid(t *testing.T) {
 	if atoi("12") != 12 || atoi("abc") != 0 || atoi("") != 0 {
 		t.Error("atoi basics")
