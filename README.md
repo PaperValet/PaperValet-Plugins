@@ -22,6 +22,7 @@ External plugins for [PaperValet](https://github.com/PaperValet/PaperValet) · [
 | atadmins | `atadmins` | 一键艾特全部管理员 | Mention every group admin |
 | ban | `ban` · `unban` · `kick` · `mute` · `unmute` · `sb` · `unsb` · `refresh` | 封禁、踢出、禁言与跨群批量封禁 | Ban, kick, mute and cross-group batch bans |
 | bizhi | `bizhi` | 随机高清壁纸 | Random wallpaper |
+| cosplay | `cosplay` · `cos` | 随机 Cosplay 图片 | Random cosplay photos |
 | crazy4 | `crazy4` | 随机疯狂星期四文案，一轮内不重复 | Random Crazy Thursday copypasta, no repeats per round |
 | diss | `diss` | 儒雅随和版祖安语录 | Random polite roast |
 | duckduckgo | `duckduckgo` · `ddg` | DuckDuckGo 网页搜索 | Web search |
