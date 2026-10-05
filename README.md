@@ -24,6 +24,7 @@ External plugins for [PaperValet](https://github.com/PaperValet/PaperValet) · [
 | annualreport | `annualreport` | 生成群年度/时段报告：活跃、 Top 发言、时段分布 | Chat stats report: activity, top talkers, hour bins |
 | atadmins | `atadmins` | 一键艾特全部管理员 | Mention every group admin |
 | autochangename | `autochangename` | 自动轮换账号名字/简介 | Auto-rotate the account name or bio |
+| autodel | `autodel` | 定时自动删自己的消息，含命令输出清理 | Auto-delete your messages on a timer, incl. command outputs |
 | ban | `ban` · `unban` · `kick` · `mute` · `unmute` · `sb` · `unsb` · `refresh` | 封禁、踢出、禁言与跨群批量封禁 | Ban, kick, mute and cross-group batch bans |
 | bgp | `bgp` | 查询 IP/ASN/前缀的 BGP 路由信息 | BGP routing info for an IP/ASN/prefix |
 | bizhi | `bizhi` | 随机高清壁纸 | Random wallpaper |
