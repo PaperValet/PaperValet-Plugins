@@ -52,7 +52,7 @@ External plugins for [PaperValet](https://github.com/PaperValet/PaperValet) · [
 | portball | `portball` | 回复消息限时禁言，到期自动解除 | Mute someone by reply for a set time |
 | postsearch | `postsearch` | 搜索频道/群组帖子 | Search channel and group posts |
 | premium | `premium` | 统计群里的 Premium 会员 | Count Premium members in a group |
-| quote | `quote` | 回复消息生成引用图，本地纯 Go 渲染 | Turn replied messages into a quote image, rendered locally in pure Go |
+| quote | `quote` | 回复消息生成引用图（quote-api 官方引擎，需 Node.js） | Turn replied messages into a quote image via the official quote-api engine (needs Node.js) |
 | rev | `rev` | 反转文字，翻转或反色媒体 | Reverse text, flip or invert media |
 | save | `save` | 保存和转发消息，绕过禁止转发 | Save messages, even from no-forward chats |
 | sendat | `sendat` | 定时发送消息，重启不丢 | Scheduled messages that survive restarts |
