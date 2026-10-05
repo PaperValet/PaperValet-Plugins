@@ -14,9 +14,10 @@ import (
 )
 
 const (
-	maxSleep   = time.Minute // re-evaluate at least this often
-	noAPIRetry = 30 * time.Second
-	listRunes  = 3800 // list chunks stay below the message limit
+	maxSleep     = time.Minute // re-evaluate at least this often
+	noAPIRetry   = 30 * time.Second
+	listRunes    = 3800             // list chunks stay below the message limit
+	saveDebounce = 30 * time.Second // coalesce accounting-only disk writes
 )
 
 var Metadata = &plugin.PluginMetadata{
@@ -38,6 +39,9 @@ type AcronPlugin struct {
 	host   plugin.Host
 	logger plugin.Logger
 	set    plugin.Settings
+
+	dirty    bool      // accounting fields changed since the last disk write
+	lastSave time.Time // gates saveDebounce for accounting writes
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -137,14 +141,22 @@ func (p *AcronPlugin) Stop(ctx context.Context) error {
 	cancel, done := p.cancel, p.done
 	p.cancel, p.done = nil, nil
 	p.mu.Unlock()
-	if cancel == nil {
-		return nil
+	if cancel != nil {
+		cancel()
+		select {
+		case <-done:
+		case <-ctx.Done():
+		}
 	}
-	cancel()
-	select {
-	case <-done:
-	case <-ctx.Done():
+	// The scheduler loop is gone; persist any accounting changes the
+	// debounce window had not flushed yet (unconditionally).
+	p.mu.Lock()
+	if p.dirty {
+		if err := p.saveLocked(); err != nil && p.logger != nil {
+			p.logger.Warn("acron: save failed", "error", err)
+		}
 	}
+	p.mu.Unlock()
 	return nil
 }
 
@@ -180,6 +192,7 @@ func (p *AcronPlugin) loop(ctx context.Context, done chan struct{}) {
 		if ctx.Err() != nil {
 			return
 		}
+		p.flushStale()
 		d := p.sleepFor(time.Now())
 		if !timer.Stop() {
 			select {
@@ -235,13 +248,13 @@ func (p *AcronPlugin) runDue(ctx context.Context) {
 			continue
 		}
 		snap := *t
-		res, err := p.runTask(ctx, &snap)
-		p.afterRun(t.ID, res, err)
+		res, newPeer, err := p.runTask(ctx, &snap)
+		p.afterRun(t.ID, res, newPeer, err)
 	}
 }
 
 // afterRun records the outcome and reschedules.
-func (p *AcronPlugin) afterRun(id int, res string, runErr error) {
+func (p *AcronPlugin) afterRun(id int, res string, newPeer *peerRef, runErr error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	idx := p.indexLocked(id)
@@ -250,6 +263,9 @@ func (p *AcronPlugin) afterRun(id int, res string, runErr error) {
 		return
 	}
 	t := p.tasks[idx]
+	if newPeer != nil {
+		t.Peer = newPeer
+	}
 	t.LastRunAt = time.Now().Unix()
 	if runErr != nil {
 		t.LastError = truncate(runErrorText(p.tl(), runErr), 200)
@@ -266,8 +282,37 @@ func (p *AcronPlugin) afterRun(id int, res string, runErr error) {
 	} else {
 		delete(p.next, id)
 	}
-	if err := p.saveLocked(); err != nil && p.logger != nil {
-		p.logger.Warn("acron: save failed", "error", err)
+	p.saveAccountingLocked()
+}
+
+// saveAccountingLocked persists accounting-only changes (LastRunAt/LastResult/
+// LastError and re-resolved peers), coalescing writes within saveDebounce so
+// second-level crons do not rewrite tasks.json on every fire. Callers hold mu.
+func (p *AcronPlugin) saveAccountingLocked() {
+	now := time.Now()
+	if p.dirty && now.Sub(p.lastSave) >= saveDebounce {
+		if err := p.saveLocked(); err != nil { // resets dirty/lastSave on success
+			if p.logger != nil {
+				p.logger.Warn("acron: save failed", "error", err)
+			}
+		}
+		return
+	}
+	p.dirty = true
+	if p.lastSave.IsZero() {
+		p.lastSave = now
+	}
+}
+
+// flushStale persists accounting changes once the debounce window has passed,
+// so the final run of a slow task does not stay in memory indefinitely.
+func (p *AcronPlugin) flushStale() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.dirty && time.Since(p.lastSave) >= saveDebounce {
+		if err := p.saveLocked(); err != nil && p.logger != nil {
+			p.logger.Warn("acron: save failed", "error", err)
+		}
 	}
 }
 
@@ -298,7 +343,12 @@ func (p *AcronPlugin) loadLocked() error {
 }
 
 func (p *AcronPlugin) saveLocked() error {
-	return writeJSON(filepath.Join(p.dir, tasksFile), storeFile{NextID: p.nextID, Tasks: p.tasks})
+	if err := writeJSON(filepath.Join(p.dir, tasksFile), storeFile{NextID: p.nextID, Tasks: p.tasks}); err != nil {
+		return err
+	}
+	p.dirty = false
+	p.lastSave = time.Now()
+	return nil
 }
 
 func (p *AcronPlugin) indexLocked(id int) int {

@@ -139,19 +139,8 @@ func (p *AcronPlugin) cmdAdd(ctx *plugin.CommandContext, sub string, rest []stri
 	}
 
 	p.mu.Lock()
-	t.ID = p.nextID
-	p.nextID++
-	p.tasks = append(p.tasks, t)
-	if at := p.taskNext(*t, time.Now()); !at.IsZero() {
-		p.next[t.ID] = at
-	}
-	nextAt := p.next[t.ID]
+	nextAt, err := p.addTaskLocked(t)
 	loc := p.loc
-	err = p.saveLocked()
-	if err != nil {
-		p.tasks = p.tasks[:len(p.tasks)-1]
-		delete(p.next, t.ID)
-	}
 	p.mu.Unlock()
 	if err != nil {
 		return ctx.Edit("❌ " + tl("保存任务失败: ", "Failed to save task: ") + plugin.Escape(err.Error()))
@@ -207,6 +196,26 @@ func boolDigit(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// addTaskLocked assigns the task id, registers it and persists everything,
+// rolling the id counter back when the save fails so it is not burned on a
+// task that was never stored. Callers hold mu.
+func (p *AcronPlugin) addTaskLocked(t *Task) (nextAt time.Time, err error) {
+	t.ID = p.nextID
+	p.nextID++
+	p.tasks = append(p.tasks, t)
+	if at := p.taskNext(*t, time.Now()); !at.IsZero() {
+		p.next[t.ID] = at
+	}
+	nextAt = p.next[t.ID]
+	if err := p.saveLocked(); err != nil {
+		p.tasks = p.tasks[:len(p.tasks)-1]
+		delete(p.next, t.ID)
+		p.nextID-- // nothing persisted; reuse the id on the next attempt
+		return time.Time{}, err
+	}
+	return nextAt, nil
 }
 
 // hasMarkup reports whether the message carries an inline keyboard.

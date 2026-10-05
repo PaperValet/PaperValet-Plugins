@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -15,15 +16,17 @@ import (
 
 const runTimeout = 60 * time.Second
 
-// runTask executes one task and returns a result summary.
-func (p *AcronPlugin) runTask(ctx context.Context, t *Task) (string, error) {
+// runTask executes one task and returns a result summary. A non-nil second
+// return value is a re-resolved peer that should be written back to the
+// stored task.
+func (p *AcronPlugin) runTask(ctx context.Context, t *Task) (string, *peerRef, error) {
 	if p.host == nil {
-		return "", errors.New("host unavailable")
+		return "", nil, errors.New("host unavailable")
 	}
 	api := p.host.API()
 	resolver := p.host.PeerResolver()
 	if api == nil {
-		return "", errors.New("API client unavailable")
+		return "", nil, errors.New("API client unavailable")
 	}
 	rctx, cancel := context.WithTimeout(ctx, runTimeout)
 	defer cancel()
@@ -33,39 +36,87 @@ func (p *AcronPlugin) runTask(ctx context.Context, t *Task) (string, error) {
 		if t.ChatID != 0 {
 			pl, err := resolver.ResolveFromChatID(rctx, t.ChatID)
 			if err != nil {
-				return "", fmt.Errorf("resolve chat %d: %w", t.ChatID, err)
+				return "", nil, fmt.Errorf("resolve chat %d: %w", t.ChatID, err)
 			}
 			peer = pl
 		} else if t.Chat != "" {
 			name := strings.TrimPrefix(t.Chat, "@")
 			pl, err := resolver.ResolveUsername(rctx, name)
 			if err != nil {
-				return "", fmt.Errorf("resolve %s: %w", t.Chat, err)
+				return "", nil, fmt.Errorf("resolve %s: %w", t.Chat, err)
 			}
 			peer = pl
 		}
 	}
 	if peer == nil {
-		return "", fmt.Errorf("cannot resolve target chat %q", t.Chat)
+		return "", nil, fmt.Errorf("cannot resolve target chat %q", t.Chat)
 	}
 
+	res, err := p.dispatch(rctx, api, peer, t)
+	// A stale persisted peer (channel rebuilt, access hash rotated) makes
+	// every future run fail with the same RPC error; re-resolve once and
+	// retry before giving up, reporting the fresh peer for write-back.
+	if err != nil && isStalePeerErr(err) && resolver != nil {
+		if np := resolveTargetPeer(rctx, resolver, t); np != nil && !samePeerRef(refFromPeer(np), t.Peer) {
+			res, err = p.dispatch(rctx, api, np, t)
+			return res, refFromPeer(np), err
+		}
+	}
+	return res, nil, err
+}
+
+// dispatch runs the task action against an already-resolved target peer.
+func (p *AcronPlugin) dispatch(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, t *Task) (string, error) {
 	switch t.Type {
 	case typeSend:
-		return runSend(rctx, api, peer, t)
+		return runSend(ctx, api, peer, t)
 	case typeCmd:
-		return p.runCmd(rctx, api, peer, t)
+		return p.runCmd(ctx, api, peer, t)
 	case typeCopy, typeForward:
-		return runForward(rctx, api, peer, t)
+		return runForward(ctx, api, peer, t)
 	case typeDel:
-		return runDel(rctx, api, peer, t)
+		return runDel(ctx, api, peer, t)
 	case typeDelRe:
-		return runDelRe(rctx, api, peer, t)
+		return runDelRe(ctx, api, peer, t)
 	case typePin:
-		return runPin(rctx, api, peer, t, false)
+		return runPin(ctx, api, peer, t, false)
 	case typeUnpin:
-		return runPin(rctx, api, peer, t, true)
+		return runPin(ctx, api, peer, t, true)
 	}
 	return "", fmt.Errorf("unknown task type %q", t.Type)
+}
+
+// stalePeerTypes are RPC errors meaning the stored InputPeer reference is
+// no longer usable: the channel was rebuilt, an access hash rotated, or the
+// account was reset. PEER_FLOOD is deliberately excluded — re-resolving
+// cannot fix a spam limit and an immediate retry only aggravates it.
+var stalePeerTypes = []string{"PEER_ID_INVALID", "CHANNEL_INVALID", "USER_ID_INVALID", "CHANNEL_PRIVATE"}
+
+// isStalePeerErr reports whether err indicates an unusable stored peer.
+func isStalePeerErr(err error) bool {
+	return tgerr.Is(err, stalePeerTypes...)
+}
+
+// resolveTargetPeer re-resolves a task's target chat by id, falling back to
+// its @username. Nil when both fail.
+func resolveTargetPeer(ctx context.Context, resolver plugin.PeerResolver, t *Task) tg.InputPeerClass {
+	if t.ChatID != 0 {
+		if pl, err := resolver.ResolveFromChatID(ctx, t.ChatID); err == nil && pl != nil {
+			return pl
+		}
+	}
+	if name := strings.TrimPrefix(t.Chat, "@"); name != "" && name != "me" {
+		if pl, err := resolver.ResolveUsername(ctx, name); err == nil && pl != nil {
+			return pl
+		}
+	}
+	return nil
+}
+
+// samePeerRef reports whether two peer refs name the same peer with the
+// same access hash.
+func samePeerRef(a, b *peerRef) bool {
+	return a != nil && b != nil && *a == *b
 }
 
 func runSend(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, t *Task) (string, error) {
@@ -196,6 +247,24 @@ func runDelRe(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, t *Ta
 		return "", fmt.Errorf("bad regex: %w", err)
 	}
 	// Scan the most recent `limit` messages, collecting matching ids.
+	ids, err := scanMatching(ctx, peer, limit, re, api.MessagesGetHistory)
+	if err != nil {
+		return "", err
+	}
+	if len(ids) == 0 {
+		return "无匹配消息", nil
+	}
+	if err := plugin.DeleteMessages(ctx, api, peer, ids...); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("匹配并删除 %d 条", len(ids)), nil
+}
+
+// scanMatching pages through recent history collecting ids of regular
+// messages matching re, examining at most `limit` messages. fetch is
+// injectable for tests.
+func scanMatching(ctx context.Context, peer tg.InputPeerClass, limit int, re *regexp.Regexp,
+	fetch func(context.Context, *tg.MessagesGetHistoryRequest) (tg.MessagesMessagesClass, error)) ([]int, error) {
 	var ids []int
 	scanned := 0
 	offsetID := 0
@@ -204,9 +273,9 @@ func runDelRe(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, t *Ta
 		if r := limit - scanned; r < pageSize {
 			pageSize = r
 		}
-		page, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{Peer: peer, OffsetID: offsetID, Limit: pageSize})
+		page, err := fetch(ctx, &tg.MessagesGetHistoryRequest{Peer: peer, OffsetID: offsetID, Limit: pageSize})
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		mod, ok := page.AsModified()
 		if !ok {
@@ -217,12 +286,16 @@ func runDelRe(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, t *Ta
 			break
 		}
 		for _, m := range msgs {
+			// Advance past service/empty entries too: a page of them must
+			// not leave offsetID pinned (infinite loop on the same page).
+			if id := m.GetID(); id > 0 && (offsetID == 0 || id < offsetID) {
+				offsetID = id
+			}
 			msg, ok := m.(*tg.Message)
 			if !ok {
 				continue
 			}
 			scanned++
-			offsetID = msg.ID
 			if re.MatchString(msg.Message) {
 				ids = append(ids, msg.ID)
 			}
@@ -231,13 +304,7 @@ func runDelRe(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, t *Ta
 			break
 		}
 	}
-	if len(ids) == 0 {
-		return "无匹配消息", nil
-	}
-	if err := plugin.DeleteMessages(ctx, api, peer, ids...); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("匹配并删除 %d 条", len(ids)), nil
+	return ids, nil
 }
 
 func runPin(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, t *Task, unpin bool) (string, error) {
