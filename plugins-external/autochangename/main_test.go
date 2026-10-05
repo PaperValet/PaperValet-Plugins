@@ -4,6 +4,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -271,5 +273,52 @@ func TestValidCronSetting(t *testing.T) {
 	}
 	if _, err := validCronSetting("junk"); err == nil {
 		t.Error("invalid cron accepted")
+	}
+}
+
+func TestClipLines(t *testing.T) {
+	// Under the cap: untouched.
+	s := "第一行\n第二行\n第三行"
+	if got := clipLines(s, 3900); got != s {
+		t.Errorf("short text changed: %q", got)
+	}
+	// Over the cap: cut on a line boundary, never mid-line.
+	long := ""
+	for i := 0; i < 200; i++ {
+		long += "条目" + strconv.Itoa(i) + " `代码` 一些内容让这行变长一点\n"
+	}
+	got := clipLines(long, 3900)
+	if n := len([]rune(got)); n > 3902 { // cut + "\n…"
+		t.Errorf("clipLines returned %d runes, want <= 3902", n)
+	}
+	lines := strings.Split(strings.TrimSuffix(got, "\n…"), "\n")
+	for _, l := range lines {
+		if strings.HasPrefix(l, "条目") && !strings.HasSuffix(l, "一点") {
+			t.Errorf("line cut in half: %q", l)
+		}
+	}
+	if !strings.HasSuffix(got, "\n…") {
+		t.Errorf("missing ellipsis tail: %q", got[len(got)-10:])
+	}
+	// A single huge line still gets truncated.
+	one := strings.Repeat("长", 5000)
+	if got := clipLines(one, 3900); len([]rune(got)) != 3902 { // 3900 cut + "\n…"
+		t.Errorf("hard cut = %d runes, want 3902", len([]rune(got)))
+	}
+}
+
+func TestErrTextFallbackBilingual(t *testing.T) {
+	// Unknown errors keep the raw detail but gain a localized prefix and
+	// Markdown escaping instead of dumping raw English text.
+	zh := errText(func(z, _ string) string { return z }, errors.New("weird *failure*"))
+	if !strings.HasPrefix(zh, "操作失败：") {
+		t.Errorf("zh fallback = %q, want localized prefix", zh)
+	}
+	if strings.Contains(zh, "*failure*") {
+		t.Errorf("zh fallback not escaped: %q", zh)
+	}
+	en := errText(func(_, e string) string { return e }, errors.New("weird *failure*"))
+	if !strings.HasPrefix(en, "Operation failed: ") {
+		t.Errorf("en fallback = %q, want localized prefix", en)
 	}
 }

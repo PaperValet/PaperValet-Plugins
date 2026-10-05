@@ -36,6 +36,10 @@ type ACNPlugin struct {
 	done   chan struct{}
 	wake   chan struct{}
 	rng    *rand.Rand
+
+	// rotMu serializes rotations: the scheduler loop, the `now` command
+	// and the panel button can all fire rotate concurrently.
+	rotMu sync.Mutex
 }
 
 func New() *ACNPlugin { return &ACNPlugin{} }
@@ -123,8 +127,8 @@ func (p *ACNPlugin) Init(_ context.Context, mgr plugin.Manager) error {
 		Aliases:     []string{"acn"},
 		Description: "自动轮换账号名字/简介/用户名：列表管理、立即切换、恢复原名",
 		DescEN:      "Auto-rotate the account name, bio or username: manage the list, switch now, restore",
-		Usage:       "autochangename list · add <文本|多行> · del <序号> · clear · now · status · restore · help",
-		UsageEN:     "autochangename list · add <text|multiline> · del <index> · clear · now · status · restore · help",
+		Usage:       "autochangename list · add <文本|回复多行消息> · del <序号> · clear · now · status · restore · help",
+		UsageEN:     "autochangename list · add <text|reply multiline> · del <index> · clear · now · status · restore · help",
 		Plugin:      p.Name(),
 		Category:    "tools",
 		OwnerOnly:   true,
@@ -252,7 +256,7 @@ func (p *ACNPlugin) runDue(ctx context.Context) {
 	if err != nil || due.After(time.Now()) {
 		return
 	}
-	if err := p.rotate(ctx, target, items); err != nil {
+	if _, err := p.rotate(ctx, target, items); err != nil {
 		if p.log != nil {
 			p.log.Warn("autochangename: rotate failed", "error", err)
 		}
@@ -261,12 +265,19 @@ func (p *ACNPlugin) runDue(ctx context.Context) {
 	}
 }
 
-// rotate applies the next item to the account and records state.
-func (p *ACNPlugin) rotate(ctx context.Context, target string, items []string) error {
+// rotate applies the next item to the account and records state. It returns
+// the item actually applied so callers report the real result.
+func (p *ACNPlugin) rotate(ctx context.Context, target string, items []string) (string, error) {
 	api := p.host.API()
 	if api == nil {
-		return errors.New("no API client")
+		return "", errors.New("no API client")
 	}
+	// Serialize the whole rotation: concurrent rotates race both the RPC
+	// (last write wins, possibly not what setIndex recorded) and the
+	// index bookkeeping.
+	p.rotMu.Lock()
+	defer p.rotMu.Unlock()
+
 	cur := p.st.curIndex(target)
 	nxt := nextIndex(len(items), cur, p.set.Bool("random"), func(n int) int {
 		p.mu.Lock()
@@ -283,11 +294,11 @@ func (p *ACNPlugin) rotate(ctx context.Context, target string, items []string) e
 	}
 
 	if err := applyItem(ctx, api, target, item); err != nil {
-		return err
+		return "", err
 	}
 	_ = p.st.setIndex(target, nxt)
 	_ = p.st.setLastFire(time.Now().Unix())
-	return nil
+	return item, nil
 }
 
 // captureOrigin remembers the current profile before it is changed.
@@ -423,13 +434,11 @@ func (p *ACNPlugin) doRestore(ctx context.Context) error {
 }
 
 // applyNow rotates immediately from a command (ignores enabled/schedule).
+// It reports the item that was actually applied.
 func (p *ACNPlugin) applyNow(ctx context.Context, target string) (string, error) {
 	items := p.st.items(target)
 	if len(items) == 0 {
 		return "", errors.New("empty list")
 	}
-	if err := p.rotate(ctx, target, items); err != nil {
-		return "", err
-	}
-	return items[p.st.curIndex(target)], nil
+	return p.rotate(ctx, target, items)
 }

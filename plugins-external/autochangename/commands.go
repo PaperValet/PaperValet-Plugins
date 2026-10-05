@@ -52,7 +52,7 @@ func errText(tl func(string, string) string, err error) string {
 			return tl("简介超过 70 字符限制", "The bio exceeds the 70-character limit")
 		}
 	}
-	return err.Error()
+	return tl("操作失败：", "Operation failed: ") + plugin.Escape(err.Error())
 }
 
 func (p *ACNPlugin) handle(ctx *plugin.CommandContext) error {
@@ -94,8 +94,9 @@ func (p *ACNPlugin) help(tl func(string, string) string) string {
 	b.WriteString("✏️ **" + tl("自动轮换名字/简介/用户名", "Auto name/bio/username rotation") + "**\n\n")
 	b.WriteString("**" + tl("命令", "Commands") + "**\n")
 	b.WriteString(line("autochangename list", "查看当前列表", "show the current list"))
-	b.WriteString(line(tl("autochangename add 张三|李 · 或多行", "autochangename add John|Doe · or multiline"),
-		"添加条目（名字用 | 分隔姓和名；简介/用户名每行一条）", "add entries (names use | to split first/last; bio/username one per line)"))
+	b.WriteString(line(tl("autochangename add 张三|李 · 或回复多行消息", "autochangename add John|Doe · or reply to a multiline message"),
+		"添加条目（名字用 | 分隔姓和名；多条目请回复一条每行一条的消息用 add，或用面板添加）",
+		"add entries (names use | to split first/last; for many entries reply to a one-per-line message with add, or use the panel)"))
 	b.WriteString(line("autochangename del <序号>", "删除一条", "delete one entry"))
 	b.WriteString(line("autochangename clear", "清空列表", "clear the list"))
 	b.WriteString(line("autochangename now", "立即切换到下一条", "switch to the next entry now"))
@@ -133,15 +134,41 @@ func (p *ACNPlugin) cmdList(ctx *plugin.CommandContext, target string) error {
 	b.WriteString("\n" + statusFoot(tl, p, target))
 	out := strings.TrimRight(b.String(), "\n")
 	if len([]rune(out)) > 3900 {
-		out = string([]rune(out)[:3900]) + "\n…"
+		out = clipLines(out, 3900)
 	}
 	return ctx.Edit(out)
 }
 
+// clipLines truncates text to at most max runes without cutting a line in
+// half (a cut mid-code-span breaks the Markdown rendering).
+func clipLines(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && r[cut-1] != '\n' {
+		cut--
+	}
+	if cut == 0 {
+		cut = max // single very long line: fall back to a hard cut
+	}
+	return strings.TrimRight(string(r[:cut]), "\n") + "\n…"
+}
+
 func (p *ACNPlugin) cmdAdd(ctx *plugin.CommandContext, target, text string) error {
 	tl := ctx.Tlocal
+	// The framework folds a pasted multiline command into one line, so
+	// multiline entry works by replying to a message with the entries.
 	if strings.TrimSpace(text) == "" {
-		return ctx.Edit("❌ " + tl("请提供要添加的内容；名字写法 ", "Give the entry to add; names use ") + plugin.Code("名|姓"))
+		if m, err := ctx.ReplyMessage(); err == nil && strings.TrimSpace(m.Message) != "" {
+			text = m.Message
+		}
+	}
+	if strings.TrimSpace(text) == "" {
+		return ctx.Edit("❌ " + tl("请提供要添加的内容；名字写法 ", "Give the entry to add; names use ") + plugin.Code("名|姓") +
+			"\n" + tl("多条目：回复一条多行消息发 ", "Multiple entries: reply to a multiline message with ") + plugin.Code("autochangename add") +
+			tl("（每行一条）", " (one per line)"))
 	}
 	existing := p.st.items(target)
 	added, dup, invalid := parseItems(text, target, existing)
