@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -97,8 +98,14 @@ func archiveName(goos, goarch, goarm string) (string, error) {
 }
 
 // downloadCLI fetches and unpacks the Ookla CLI into data/speedtest.
-// With force=false an existing binary is kept.
+// With force=false an existing binary is kept. dlMu serializes installs:
+// list/test/best can trigger a download that would otherwise race a
+// running test's install and corrupt the temp file.
+var dlMu sync.Mutex
+
 func downloadCLI(ctx context.Context, force bool) error {
+	dlMu.Lock()
+	defer dlMu.Unlock()
 	path := cliPath()
 	if !force {
 		if _, err := os.Stat(path); err == nil {

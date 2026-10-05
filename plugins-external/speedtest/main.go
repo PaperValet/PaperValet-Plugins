@@ -782,6 +782,30 @@ func toStickerWebp(c context.Context, src, dir string) (string, error) {
 	return out, nil
 }
 
+// realReply returns the id of the message the command actually replies to.
+// A plain message inside a forum topic carries a reply header pointing at
+// the topic root; posting the result as a reply to that would attach it to
+// the topic root instead of the message the user sees.
+func realReply(ev *plugin.MessageEvent) int {
+	if ev == nil || ev.Message == nil {
+		return 0
+	}
+	hdr, ok := ev.Message.ReplyTo.(*tg.MessageReplyHeader)
+	if !ok {
+		return 0
+	}
+	id, has := hdr.GetReplyToMsgID()
+	if !has || id <= 0 {
+		return 0
+	}
+	if hdr.ForumTopic {
+		if _, hasTop := hdr.GetReplyToTopID(); !hasTop {
+			return 0
+		}
+	}
+	return id
+}
+
 func sendUploaded(c context.Context, ctx *plugin.CommandContext, path, kind, caption string, ents []tg.MessageEntityClass) error {
 	peer, err := ctx.ResolvePeer()
 	if err != nil {
@@ -815,8 +839,8 @@ func sendUploaded(c context.Context, ctx *plugin.CommandContext, path, kind, cap
 	if len(ents) > 0 {
 		req.SetEntities(ents)
 	}
-	if ctx.Message != nil && ctx.Message.ReplyToID > 0 {
-		req.SetReplyTo(&tg.InputReplyToMessage{ReplyToMsgID: ctx.Message.ReplyToID})
+	if reply := realReply(ctx.Message); reply != 0 {
+		req.SetReplyTo(&tg.InputReplyToMessage{ReplyToMsgID: reply})
 	}
 	_, err = ctx.API.MessagesSendMedia(uc, req)
 	return err
