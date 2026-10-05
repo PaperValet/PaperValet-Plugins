@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
@@ -77,6 +79,47 @@ func TestFatal(t *testing.T) {
 	}
 	if fatal(tgerr.New(400, "MESSAGE_DELETE_FORBIDDEN")) || fatal(errors.New("x")) {
 		t.Fatal("non-fatal errors")
+	}
+}
+
+func TestCallTimesOut(t *testing.T) {
+	// call must bound fn with the per-request deadline so one stuck RPC
+	// cannot stretch the wipe (and Stop) indefinitely. (Waiting the full
+	// 30s for the deadline to fire would slow the suite; stdlib
+	// WithTimeout semantics do the rest.)
+	_, err := call(context.Background(), func(ctx context.Context) (string, error) {
+		dl, ok := ctx.Deadline()
+		if !ok {
+			t.Error("call provided no deadline")
+		} else if remaining := time.Until(dl); remaining <= 0 || remaining > rpcTimeout {
+			t.Errorf("deadline remaining = %v, want (0, %v]", remaining, rpcTimeout)
+		}
+		return "ok", ctx.Err()
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	// A parent cancellation propagates into the call context.
+	parent, cancel := context.WithCancel(context.Background())
+	canceled := callErr(parent, func(c context.Context) error {
+		cancel()
+		<-c.Done()
+		return c.Err()
+	})
+	if !errors.Is(canceled, context.Canceled) {
+		t.Fatalf("err = %v, want Canceled", canceled)
+	}
+}
+
+func TestCallPassesValue(t *testing.T) {
+	got, err := call(context.Background(), func(ctx context.Context) (int, error) {
+		return 7, nil
+	})
+	if err != nil || got != 7 {
+		t.Fatalf("call = %d, %v", got, err)
+	}
+	if err := callErr(context.Background(), func(context.Context) error { return nil }); err != nil {
+		t.Fatalf("callErr = %v", err)
 	}
 }
 

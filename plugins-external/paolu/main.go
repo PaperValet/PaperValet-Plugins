@@ -19,6 +19,7 @@ const (
 	progressEvery = 3 * time.Second
 	summaryTTL    = 10 * time.Second
 	maxFloodWait  = time.Minute
+	rpcTimeout    = 30 * time.Second // per-request timeout so Stop cannot hang on one stuck RPC
 )
 
 var Metadata = &plugin.PluginMetadata{
@@ -247,10 +248,12 @@ func (p *PaoluPlugin) wipe(ctx *plugin.CommandContext, peer tg.InputPeerClass, g
 	_ = ctx.Edit("🚨 **" + tl("一键跑路", "Wipe") + "**\n\n⏳ " + tl("正在禁言全员…", "Muting everyone…"))
 
 	r.MuteErr = retry(ctx.Context(), func() error {
-		_, err := ctx.API.MessagesEditChatDefaultBannedRights(ctx.Context(), &tg.MessagesEditChatDefaultBannedRightsRequest{
-			Peer: peer, BannedRights: muteRights(),
+		return callErr(ctx.Context(), func(c context.Context) error {
+			_, err := ctx.API.MessagesEditChatDefaultBannedRights(c, &tg.MessagesEditChatDefaultBannedRightsRequest{
+				Peer: peer, BannedRights: muteRights(),
+			})
+			return err
 		})
-		return err
 	})
 	if tgerr.Is(r.MuteErr, "CHAT_NOT_MODIFIED") {
 		r.MuteErr = nil
@@ -262,15 +265,24 @@ func (p *PaoluPlugin) wipe(ctx *plugin.CommandContext, peer tg.InputPeerClass, g
 		return // plugin stopped; leave the progress message as is
 	}
 
+	// Deliver the result before destroying the places it could be shown:
+	// try a fresh summary message first; if that fails fall back to
+	// editing the command message (still alive), and only then delete the
+	// command message.
+	sum := summary(tl, g.Title, r)
+	msgID, sendErr := call(ctx.Context(), func(c context.Context) (int, error) {
+		return p.host.Send(c, ctx.Message.ChatID, sum, 0)
+	})
+	if sendErr != nil {
+		p.warn(ctx, "send summary failed", sendErr)
+		if err := ctx.Edit(sum); err != nil {
+			p.warn(ctx, "edit command message with summary failed", err)
+		}
+	}
 	if err := ctx.Delete(); err != nil {
 		p.warn(ctx, "delete command message failed", err)
 	}
-	msgID, err := p.host.Send(ctx.Context(), ctx.Message.ChatID, summary(tl, g.Title, r), 0)
-	if err != nil {
-		p.warn(ctx, "send summary failed", err)
-		// The command message survives when its delete failed too; show the
-		// result there instead.
-		_ = ctx.Edit(summary(tl, g.Title, r))
+	if sendErr != nil {
 		return
 	}
 	select {
@@ -283,6 +295,22 @@ func (p *PaoluPlugin) wipe(ctx *plugin.CommandContext, peer tg.InputPeerClass, g
 	if err := plugin.DeleteMessages(dctx, ctx.API, peer, msgID); err != nil {
 		p.warn(ctx, "delete summary failed", err)
 	}
+}
+
+// call bounds one Telegram RPC with a per-request timeout so a stuck call
+// cannot stretch the wipe (and with it Stop's wg.Wait) indefinitely.
+func call[T any](parent context.Context, fn func(context.Context) (T, error)) (T, error) {
+	ctx, cancel := context.WithTimeout(parent, rpcTimeout)
+	defer cancel()
+	return fn(ctx)
+}
+
+// callErr is call for requests whose result is ignored.
+func callErr(parent context.Context, fn func(context.Context) error) error {
+	_, err := call(parent, func(c context.Context) (struct{}, error) {
+		return struct{}{}, fn(c)
+	})
+	return err
 }
 
 // deleteHistory walks the history from newest to oldest and deletes every
@@ -299,8 +327,10 @@ func (p *PaoluPlugin) deleteHistory(ctx *plugin.CommandContext, peer tg.InputPee
 		var page tg.MessagesMessagesClass
 		err := retry(ctx.Context(), func() error {
 			var err error
-			page, err = ctx.API.MessagesGetHistory(ctx.Context(), &tg.MessagesGetHistoryRequest{
-				Peer: peer, OffsetID: offset, Limit: pageSize,
+			page, err = call(ctx.Context(), func(c context.Context) (tg.MessagesMessagesClass, error) {
+				return ctx.API.MessagesGetHistory(c, &tg.MessagesGetHistoryRequest{
+					Peer: peer, OffsetID: offset, Limit: pageSize,
+				})
 			})
 			return err
 		})
@@ -335,7 +365,9 @@ func (p *PaoluPlugin) deleteHistory(ctx *plugin.CommandContext, peer tg.InputPee
 // undeletable service message poisons the whole call) it retries one by one.
 func (p *PaoluPlugin) deleteBatch(ctx *plugin.CommandContext, peer tg.InputPeerClass, ids []int) (ok, failed int, err error) {
 	err = retry(ctx.Context(), func() error {
-		return plugin.DeleteMessages(ctx.Context(), ctx.API, peer, ids...)
+		return callErr(ctx.Context(), func(c context.Context) error {
+			return plugin.DeleteMessages(c, ctx.API, peer, ids...)
+		})
 	})
 	if err == nil {
 		return len(ids), 0, nil
@@ -345,7 +377,9 @@ func (p *PaoluPlugin) deleteBatch(ctx *plugin.CommandContext, peer tg.InputPeerC
 	}
 	for _, id := range ids {
 		err := retry(ctx.Context(), func() error {
-			return plugin.DeleteMessages(ctx.Context(), ctx.API, peer, id)
+			return callErr(ctx.Context(), func(c context.Context) error {
+				return plugin.DeleteMessages(c, ctx.API, peer, id)
+			})
 		})
 		switch {
 		case err == nil:
