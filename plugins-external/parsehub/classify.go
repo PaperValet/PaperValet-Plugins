@@ -2,6 +2,7 @@ package main
 
 import (
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gotd/td/tg"
 )
@@ -39,6 +40,10 @@ func stripProgressDeco(s string) string {
 }
 
 // isProgressText reports whether text is a placeholder progress line.
+// Known wordings first; beyond that, a short line wrapped in decorative
+// runes (the ▄▄ bars the bot frames its placeholders with) also counts, so
+// a wording change or an English locale does not leak the placeholder as a
+// final result.
 func isProgressText(text string) bool {
 	if text == "" {
 		return false
@@ -48,6 +53,30 @@ func isProgressText(text string) bool {
 		if strings.HasPrefix(stripped, prefix) {
 			return true
 		}
+	}
+	// Unknown wording framed by decorative runes: strip the deco at both
+	// ends; if the remainder is short and deco was present, it still looks
+	// like a placeholder.
+	if hasDeco(text) && utf8.RuneCountInString(stripped) <= 80 {
+		return true
+	}
+	return false
+}
+
+// hasDeco reports whether s is framed by decorative runes: the first
+// non-whitespace rune is a block/geometric/zero-width decoration, the way
+// @ParseHubot frames its progress placeholders (plain whitespace does not
+// count — real results carry spaces too).
+func hasDeco(s string) bool {
+	for _, r := range s {
+		switch r {
+		case ' ', '	', '\n', '\r':
+			continue
+		}
+		return (r >= 0x2580 && r <= 0x259F) || // block elements
+			(r >= 0x25A0 && r <= 0x25FF) || // geometric shapes
+			(r >= 0x2000 && r <= 0x200F) || // zero-width and friends
+			r == 0xFEFF || r == 0x3000
 	}
 	return false
 }
@@ -65,7 +94,11 @@ func hasMedia(m *tg.Message) bool {
 }
 
 // isFinalMessage reports whether m is a deliverable result: media, or any
-// non-progress text.
+// non-progress text. A short no-media text that is not a known progress
+// placeholder is still treated as final — but a very long one is not, since
+// @ParseHubot's placeholders are decorated one-liners; if the bot changes
+// its progress wording, waiting for the resultIdle quiet period below makes
+// such a text the answer only after the bot goes quiet.
 func isFinalMessage(m *tg.Message) bool {
 	if hasMedia(m) {
 		return true

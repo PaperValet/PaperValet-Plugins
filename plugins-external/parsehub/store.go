@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"os"
@@ -116,14 +118,21 @@ func writeJSON(path string, v any) error {
 	return os.Rename(name, path)
 }
 
-// randomID returns a fresh client-side message id.
-func randomID() int64 { return timeNow().UnixNano() }
+// randomID returns a fresh client-side message id; crypto/rand avoids the
+// UnixNano collision that makes Telegram silently drop the send.
+func randomID() int64 {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err == nil {
+		return int64(binary.LittleEndian.Uint64(b[:]))
+	}
+	return timeNow().UnixNano()
+}
 
 // randomIDs returns n fresh client-side message ids.
 func randomIDs(n int) []int64 {
 	out := make([]int64, n)
 	for i := range out {
-		out[i] = randomID() + int64(i)
+		out[i] = randomID()
 	}
 	return out
 }

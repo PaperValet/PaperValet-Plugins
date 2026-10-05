@@ -87,6 +87,30 @@ func TestIsProgressText(t *testing.T) {
 			t.Errorf("isProgressText(%q) = true, want false", s)
 		}
 	}
+	// Unknown wording but framed by decoration runes: still a placeholder,
+	// so a bot wording change or English locale does not leak it as final.
+	for _, s := range []string{"▄▄ Parsing 42% ▄▄", "▮▮ Downloading…", "▁▁▂▂ uploading"} {
+		if !isProgressText(s) {
+			t.Errorf("isProgressText(%q) = false, want true (decorated placeholder)", s)
+		}
+	}
+	// A plain result must not be flagged even when it carries spaces.
+	for _, s := range []string{"解析完成 https://t.me/x", "Download ready: https://x.io/f.mp4"} {
+		if isProgressText(s) {
+			t.Errorf("isProgressText(%q) = true, want false (plain result)", s)
+		}
+	}
+}
+
+func TestRandomIDDistinct(t *testing.T) {
+	seen := map[int64]bool{}
+	for i := 0; i < 10000; i++ {
+		id := randomID()
+		if seen[id] {
+			t.Fatalf("randomID collision at %d", id)
+		}
+		seen[id] = true
+	}
 }
 
 func TestClassifyMessage(t *testing.T) {

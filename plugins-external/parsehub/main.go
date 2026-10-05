@@ -35,6 +35,9 @@ const (
 	linkGap = 600 * time.Millisecond
 	// forwardChunk is Telegram's per-forward limit.
 	forwardChunk = 100
+	// maxFetchFails is how many consecutive bot-chat fetches may fail
+	// (FLOOD_WAIT on the 2s poll included) before the link is given up.
+	maxFetchFails = 3
 )
 
 var Metadata = &plugin.PluginMetadata{

@@ -381,6 +381,7 @@ func (p *ParseHubPlugin) relayParseResult(ctx *plugin.CommandContext, api *tg.Cl
 	lastID := baseline
 	var lastFinal, lastProgress time.Time
 	lastProgress = timeNow()
+	fetchFails := 0
 
 	for {
 		select {
@@ -394,8 +395,18 @@ func (p *ParseHubPlugin) relayParseResult(ctx *plugin.CommandContext, api *tg.Cl
 
 		msgs, err := p.botHistory(ctx, api, fetchLimit)
 		if err != nil {
-			return relayOutcome{lastID: lastID, reason: reasonFetchFailed, err: err}
+			// A single transient failure (FLOOD_WAIT on this 2s poll
+			// included) must not kill the whole wait.
+			fetchFails++
+			if fetchFails >= maxFetchFails || cctx.Err() != nil {
+				return relayOutcome{lastID: lastID, reason: reasonFetchFailed, err: err}
+			}
+			if p.logger != nil {
+				p.logger.Debug("parsehub: poll fetch failed", "attempt", fetchFails, "error", err)
+			}
+			continue
 		}
+		fetchFails = 0
 
 		// Oldest first so earlier progress messages register before finals.
 		for i := len(msgs) - 1; i >= 0; i-- {
@@ -453,6 +464,7 @@ func (p *ParseHubPlugin) relayParseResult(ctx *plugin.CommandContext, api *tg.Cl
 	}
 
 	var forwarded bool
+	var forwardErr error
 	var fallbacks []string
 	for start := 0; start < len(ids); start += forwardChunk {
 		end := min(start+forwardChunk, len(ids))
@@ -464,6 +476,7 @@ func (p *ParseHubPlugin) relayParseResult(ctx *plugin.CommandContext, api *tg.Cl
 			RandomID:   randomIDs(len(chunk)),
 			DropAuthor: true,
 		}); err != nil {
+			forwardErr = err
 			if p.logger != nil {
 				p.logger.Warn("parsehub: forward chunk failed", "error", err)
 			}
@@ -480,6 +493,10 @@ func (p *ParseHubPlugin) relayParseResult(ctx *plugin.CommandContext, api *tg.Cl
 	if !forwarded && len(fallbacks) > 0 {
 		text := "📨 " + ctx.Tlocal("@ParseHubot 返回内容：", "Content returned by @ParseHubot:") + "\n\n" +
 			strings.Join(fallbacks, "\n\n")
+		if forwardErr != nil && (strings.Contains(forwardErr.Error(), "CHAT_FORWARDS_RESTRICTED") ||
+			strings.Contains(forwardErr.Error(), "CHAT_SEND_MEDIA_FORBIDDEN")) {
+			text += "\n\n💡 " + ctx.Tlocal("本群禁止转发/媒体消息，以上仅为文字部分，媒体无法转入", "This group forbids forwarded/media messages; only the text could be posted")
+		}
 		if len([]rune(text)) > 3900 {
 			text = string([]rune(text)[:3900]) + "…"
 		}
