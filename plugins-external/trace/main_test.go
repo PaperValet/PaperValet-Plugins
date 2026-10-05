@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/gotd/td/tg"
+
+	"github.com/TiaraBasori/PaperValet/pkg/plugin"
 )
 
 func TestParseReactionsStandard(t *testing.T) {
@@ -69,6 +71,36 @@ func TestToTG(t *testing.T) {
 	}
 	if c, ok := r[1].(*tg.ReactionCustomEmoji); !ok || c.DocumentID != 987 {
 		t.Fatalf("bad %T", r[1])
+	}
+}
+
+func TestReplyMsgID(t *testing.T) {
+	ev := &plugin.MessageEvent{Message: &tg.Message{}}
+	if got := replyMsgID(ev); got != 0 {
+		t.Fatal("no reply header")
+	}
+	if got := replyMsgID(nil); got != 0 {
+		t.Fatal("nil event")
+	}
+	h := &tg.MessageReplyHeader{}
+	h.SetReplyToMsgID(42)
+	ev.Message.ReplyTo = h
+	if got := replyMsgID(ev); got != 42 {
+		t.Fatalf("plain reply: %d", got)
+	}
+	// Plain message inside a forum topic: header points at the topic root,
+	// which is not a reply — must not be treated as one.
+	ft := &tg.MessageReplyHeader{ForumTopic: true}
+	ft.SetReplyToMsgID(7)
+	ev.Message.ReplyTo = ft
+	if got := replyMsgID(ev); got != 0 {
+		t.Fatalf("topic root treated as reply: %d", got)
+	}
+	// A real reply inside a topic carries replyToTopID as well.
+	ft.SetReplyToTopID(7)
+	ft.SetReplyToMsgID(50)
+	if got := replyMsgID(ev); got != 50 {
+		t.Fatalf("real reply in topic: %d", got)
 	}
 }
 

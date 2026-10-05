@@ -164,6 +164,30 @@ func senderKey(msg *tg.Message) int64 {
 	return plugin.ChatIDOf(msg.PeerID)
 }
 
+// replyMsgID returns the id of the message the command actually replies
+// to, or 0. A plain message inside a forum topic carries a reply header
+// pointing at the topic root; that is not a reply (host re.go has the same
+// distinction).
+func replyMsgID(ev *plugin.MessageEvent) int {
+	if ev == nil || ev.Message == nil {
+		return 0
+	}
+	hdr, ok := ev.Message.ReplyTo.(*tg.MessageReplyHeader)
+	if !ok {
+		return 0
+	}
+	id, has := hdr.GetReplyToMsgID()
+	if !has || id <= 0 {
+		return 0
+	}
+	if hdr.ForumTopic {
+		if _, hasTop := hdr.GetReplyToTopID(); !hasTop {
+			return 0
+		}
+	}
+	return id
+}
+
 // onMessage runs on the update path; the reaction is sent in a goroutine.
 func (p *TracePlugin) onMessage(_ context.Context, ev *plugin.MessageEvent, edited bool) {
 	if edited || ev == nil || ev.IsOut || ev.Message == nil {
@@ -251,7 +275,7 @@ func (p *TracePlugin) handle(ctx *plugin.CommandContext) error {
 	if sub == "help" {
 		return ctx.Edit(helpText(ctx))
 	}
-	if ctx.Message.ReplyToID != 0 {
+	if reply := replyMsgID(ctx.Message); reply != 0 {
 		if len(ctx.Args) == 0 {
 			return p.untraceUser(ctx)
 		}
