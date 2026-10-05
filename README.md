@@ -43,6 +43,7 @@ External plugins for [PaperValet](https://github.com/PaperValet/PaperValet) · [
 | music | `music` | 通过音乐机器人搜歌发歌，支持多平台和先搜后选 | Songs via music bots, multi-platform, search then pick |
 | news | `news` | 每日新闻、历史上的今天、成语和诗词 | Daily Chinese news digest |
 | paolu | `paolu` | 一键跑路：禁言全员并清空群消息 | Mute everyone and wipe the group history |
+| pmcaptcha | `pmc` | 私信验证码门禁 | PM captcha gate |
 | portball | `portball` | 回复消息限时禁言，到期自动解除 | Mute someone by reply for a set time |
 | postsearch | `postsearch` | 搜索频道/群组帖子 | Search channel and group posts |
 | premium | `premium` | 统计群里的 Premium 会员 | Count Premium members in a group |
