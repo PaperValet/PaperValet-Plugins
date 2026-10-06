@@ -20,7 +20,7 @@ func (p *ShiftPlugin) onMessage(ctx context.Context, ev *plugin.MessageEvent, ed
 		return
 	}
 	// Skip command traffic (the owner's own command messages).
-	if ev.IsOut && isCommandText(ev.Text) {
+	if ev.IsOut && p.isCommandText(ev.Text) {
 		return
 	}
 	p.mu.Lock()
@@ -38,21 +38,31 @@ func (p *ShiftPlugin) onMessage(ctx context.Context, ev *plugin.MessageEvent, ed
 	if dst == src {
 		return
 	}
-	p.wgs.Add(1)
+	gen := p.wgAdd()
 	go func() {
-		defer p.wgs.Done()
+		defer p.wgDone(gen)
 		p.forwardOne(ctx, ev, rule, src, dst, 0)
 	}()
 }
 
-// isCommandText reports whether text starts with any command prefix.
-func isCommandText(text string) bool {
+// isCommandText reports whether text starts with any configured command
+// prefix. Falls back to the default prefixes when the host is unavailable
+// (tests) so custom prefixes are respected in production.
+func (p *ShiftPlugin) isCommandText(text string) bool {
 	if text == "" {
 		return false
 	}
+	p.mu.Lock()
+	host := p.host
+	p.mu.Unlock()
 	prefixes := []string{".", "!", "/", "#"}
+	if host != nil {
+		if hp := host.Prefixes(); len(hp) > 0 {
+			prefixes = hp
+		}
+	}
 	for _, pr := range prefixes {
-		if len(text) > 1 && text[:1] == pr {
+		if pr != "" && len(text) > len(pr) && strings.HasPrefix(text, pr) {
 			return true
 		}
 	}
@@ -118,32 +128,39 @@ func (p *ShiftPlugin) forwardOne(ctx context.Context, ev *plugin.MessageEvent, r
 
 // chainForward fetches the forwarded copy in the target chat and continues
 // along the chain. The copy id is unknown, so we look for the newest message
-// in the target chat with the same grouped/media fingerprint, best effort.
+// in the target chat, best effort.
 func (p *ShiftPlugin) chainForward(ctx context.Context, from, to int64, origID int, rule *Rule, depth int) {
 	info, err := p.peerFor(from)
 	if err != nil {
 		return
 	}
+	// origID belongs to the SOURCE chat: using it as OffsetID in the TARGET
+	// chat's history has no meaning and can skip past the copy we want.
+	// Fetch the newest messages instead.
 	hist, err := p.api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
-		Peer:     info.Peer,
-		Limit:    5,
-		OffsetID: origID,
+		Peer:  info.Peer,
+		Limit: 5,
 	})
 	if err != nil {
 		return
 	}
-	slice, ok := hist.(*tg.MessagesMessagesSlice)
-	if !ok {
+	// Basic groups answer messages.messages (not the Slice wrapper); accept
+	// both so chained forwarding does not silently stop there.
+	var msgs []tg.MessageClass
+	switch v := hist.(type) {
+	case *tg.MessagesMessagesSlice:
+		msgs = v.Messages
+	case *tg.MessagesMessages:
+		msgs = v.Messages
+	case *tg.MessagesMessagesNotModified:
+		return
+	default:
 		return
 	}
 	var id int
-	for _, m := range slice.Messages {
-		msg, ok := m.(*tg.Message)
-		if !ok {
-			continue
-		}
-		if msg.ID > id {
-			id = msg.ID
+	for _, m := range msgs {
+		if msgID := m.GetID(); msgID > id {
+			id = msgID
 		}
 	}
 	if id == 0 {

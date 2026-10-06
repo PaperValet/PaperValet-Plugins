@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -110,8 +111,17 @@ func parseInt(s string) (int, error) {
 }
 
 // parseIndices reads "1,3-5" rule numbers into zero-based indexes, bounded by
-// total. Invalid entries are returned for the error message.
+// total. Duplicate entries (e.g. "1,1") are collapsed so deletion does not
+// remove two different rules; invalid entries are returned for the error
+// message.
 func parseIndices(s string, total int) (idx []int, invalid []string) {
+	seen := map[int]bool{}
+	add := func(i int) {
+		if !seen[i] {
+			seen[i] = true
+			idx = append(idx, i)
+		}
+	}
 	for _, part := range strings.Split(s, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
@@ -124,7 +134,7 @@ func parseIndices(s string, total int) (idx []int, invalid []string) {
 				invalid = append(invalid, part)
 				continue
 			}
-			idx = append(idx, a-1)
+			add(a - 1)
 			continue
 		}
 		b, errB := parseInt(hi)
@@ -136,26 +146,36 @@ func parseIndices(s string, total int) (idx []int, invalid []string) {
 			b = total
 		}
 		for i := a; i <= b; i++ {
-			idx = append(idx, i-1)
+			add(i - 1)
 		}
 	}
 	return idx, invalid
 }
 
-// matchWhitelist compiles and caches rule whitelist regexes.
-var wlCache = map[string]*regexp.Regexp{}
+// wlCache compiles and caches rule whitelist regexes. The listener's
+// forwarding goroutines read it while `shift whitelist add` writes, so the
+// map is guarded by wlMu (an unlocked concurrent map write crashes the
+// whole host process).
+var (
+	wlCache = map[string]*regexp.Regexp{}
+	wlMu    sync.Mutex
+)
 
 func compileWhitelist(patterns []string) []*regexp.Regexp {
 	var out []*regexp.Regexp
 	for _, p := range patterns {
+		wlMu.Lock()
 		re, ok := wlCache[p]
+		wlMu.Unlock()
 		if !ok {
 			var err error
 			re, err = regexp.Compile("(?i)" + p)
 			if err != nil {
 				continue
 			}
+			wlMu.Lock()
 			wlCache[p] = re
+			wlMu.Unlock()
 		}
 		out = append(out, re)
 	}

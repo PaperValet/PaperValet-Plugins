@@ -154,10 +154,10 @@ func (p *ShiftPlugin) beginJob(parent context.Context) (context.Context, func(),
 		return nil, nil, errStopped
 	}
 	c, cancel := context.WithCancel(parent)
-	p.wgs.Add(1)
+	gen := p.wgAdd()
 	p.mu.Unlock()
 	return c, func() {
 		cancel()
-		p.wgs.Done()
+		p.wgDone(gen)
 	}, nil
 }

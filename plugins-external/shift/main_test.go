@@ -1,7 +1,14 @@
 package main
 
 import (
+	"context"
+	"fmt"
+	"sync"
 	"testing"
+
+	"github.com/gotd/td/tg"
+
+	"github.com/TiaraBasori/PaperValet/pkg/plugin"
 )
 
 func TestParseSetArgs(t *testing.T) {
@@ -223,14 +230,116 @@ func TestContainsAny(t *testing.T) {
 }
 
 func TestIsCommandText(t *testing.T) {
+	p := New()
 	for _, s := range []string{".shift list", "!ping", "/menu", "#help"} {
-		if !isCommandText(s) {
+		if !p.isCommandText(s) {
 			t.Errorf("%q must be a command", s)
 		}
 	}
 	for _, s := range []string{"hello", "a.b", "", "plain text"} {
-		if isCommandText(s) {
+		if p.isCommandText(s) {
 			t.Errorf("%q must not be a command", s)
 		}
+	}
+}
+
+func TestIsCommandTextCustomPrefix(t *testing.T) {
+	p := New()
+	p.mu.Lock()
+	p.host = prefixHost{prefixes: []string{"$"}}
+	p.mu.Unlock()
+	// The configured prefix is honored and the defaults are not.
+	if !p.isCommandText("$shift list") {
+		t.Error("custom prefix must be recognized")
+	}
+	if p.isCommandText(".shift list") {
+		t.Error("default prefix must not be a command when custom prefixes are set")
+	}
+}
+
+// prefixHost answers only Prefixes; isCommandText reads nothing else.
+type prefixHost struct{ prefixes []string }
+
+func (h prefixHost) Prefixes() []string { return h.prefixes }
+func (h prefixHost) API() *tg.Client    { return nil }
+func (h prefixHost) PeerResolver() plugin.PeerResolver {
+	return nil
+}
+func (h prefixHost) Media() plugin.MediaSender          { return nil }
+func (h prefixHost) Downloader() plugin.MediaDownloader { return nil }
+func (h prefixHost) SelfID() int64                      { return 0 }
+func (h prefixHost) Logger(name string) plugin.Logger   { return nil }
+func (h prefixHost) DataDir(string) (string, error)     { return "", nil }
+func (h prefixHost) Send(context.Context, int64, string, int) (int, error) {
+	return 0, nil
+}
+func (h prefixHost) Lang(int64) string { return "" }
+func (h prefixHost) Settings(*plugin.SettingsSpec) (plugin.Settings, error) {
+	return nil, nil
+}
+func (h prefixHost) Bot(string) plugin.Bot                        { return nil }
+func (h prefixHost) Listen(string, plugin.MessageListener) func() { return nil }
+func (h prefixHost) RunCommand(context.Context, *plugin.MessageEvent) (bool, error) {
+	return false, nil
+}
+
+func TestParseIndicesDedupes(t *testing.T) {
+	// "1,1" used to delete two different rules and report "deleted 2".
+	idx, invalid := parseIndices("1,1", 5)
+	if len(idx) != 1 || idx[0] != 0 {
+		t.Fatalf("dup not collapsed: %v", idx)
+	}
+	if len(invalid) != 0 {
+		t.Fatalf("unexpected invalid: %v", invalid)
+	}
+	// Overlapping range + single also collapses.
+	idx, _ = parseIndices("2,2-3", 5)
+	if len(idx) != 2 || idx[0] != 1 || idx[1] != 2 {
+		t.Fatalf("overlap not collapsed: %v", idx)
+	}
+}
+
+func TestCompileWhitelistConcurrent(t *testing.T) {
+	// The forwarding path reads wlCache while `shift whitelist add` writes
+	// it; an unlocked map would fatal "concurrent map writes" under -race.
+	patterns := make([]string, 64)
+	for i := range patterns {
+		patterns[i] = fmt.Sprintf("kw%d", i)
+	}
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				res := compileWhitelist(patterns)
+				if len(res) != len(patterns) {
+					t.Error("compileWhitelist dropped patterns")
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestStatsRecentSorted(t *testing.T) {
+	s := &Stats{Days: map[string]map[int64]int{
+		"2026-10-05": {100: 5},
+		"2026-10-07": {100: 7},
+		"2026-10-06": {100: 6},
+	}}
+	rec := s.recent(100, 7)
+	if len(rec) != 3 {
+		t.Fatalf("recent = %v", rec)
+	}
+	// Newest first, dates strictly ordered regardless of map order.
+	for i := 1; i < len(rec); i++ {
+		if rec[i-1].Date <= rec[i].Date {
+			t.Fatalf("not newest-first: %v", rec)
+		}
+	}
+	if rec[0].Date != "2026-10-07" || rec[0].Count != 7 {
+		t.Fatalf("wrong newest entry: %v", rec[0])
 	}
 }

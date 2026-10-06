@@ -46,8 +46,15 @@ type ShiftPlugin struct {
 
 	listenStop func()
 	albums     *albumForwarder
-	wgs        sync.WaitGroup // forward workers and backups
-	stopped    bool
+	// wg tracks forward/backup workers of the current generation; wgGen is
+	// its generation counter. Stop waits on wg only up to 15s; a worker
+	// still stuck in a long FLOOD_WAIT sleep after that must never touch a
+	// reset WaitGroup (negative-counter panic), so Start gives the next
+	// generation a fresh WaitGroup and stale workers detect the mismatch.
+	wg      sync.WaitGroup
+	wgGen   uint64
+	wgMu    sync.Mutex
+	stopped bool
 }
 
 func New() *ShiftPlugin {
@@ -91,17 +98,40 @@ func (p *ShiftPlugin) Init(_ context.Context, mgr plugin.Manager) error {
 func (p *ShiftPlugin) Start(_ context.Context) error {
 	p.load()
 	p.mu.Lock()
-	host, stopped := p.host, p.stopped
+	host := p.host
 	p.stopped = false
-	if stopped {
-		p.wgs = sync.WaitGroup{}
-	}
+	// New generation gets its own WaitGroup; any stragglers from a previous
+	// generation (Stop timed out on them) match against wgGen and no-op.
+	p.wgMu.Lock()
+	p.wgGen++
+	p.wgMu.Unlock()
 	p.albums = newAlbumForwarder(p.fireAlbum)
 	p.mu.Unlock()
 	if host != nil && p.listenStop == nil {
 		p.listenStop = host.Listen(p.Name(), p.onMessage)
 	}
 	return nil
+}
+
+// wgAdd registers a worker in the current generation and returns the
+// generation it belongs to.
+func (p *ShiftPlugin) wgAdd() uint64 {
+	p.wgMu.Lock()
+	defer p.wgMu.Unlock()
+	p.wg.Add(1)
+	return p.wgGen
+}
+
+// wgDone releases a worker registered in generation gen. A worker from an
+// older generation (its Stop already gave up waiting) must not decrement the
+// new generation's counter — that would panic with a negative counter.
+func (p *ShiftPlugin) wgDone(gen uint64) {
+	p.wgMu.Lock()
+	defer p.wgMu.Unlock()
+	if gen != p.wgGen {
+		return
+	}
+	p.wg.Done()
 }
 
 // Stop removes the listener, waits for in-flight forwards and persists stats.
@@ -119,7 +149,7 @@ func (p *ShiftPlugin) Stop(ctx context.Context) error {
 		albums.stop()
 	}
 	done := make(chan struct{})
-	go func() { p.wgs.Wait(); close(done) }()
+	go func() { p.wg.Wait(); close(done) }()
 	select {
 	case <-done:
 	case <-ctx.Done():
@@ -145,9 +175,9 @@ func (p *ShiftPlugin) fireAlbum(key albumKey, ids []int) {
 	if rule == nil || rule.Paused || stopped || rule.Target == key.chatID {
 		return
 	}
-	p.wgs.Add(1)
+	gen := p.wgAdd()
 	go func() {
-		defer p.wgs.Done()
+		defer p.wgDone(gen)
 		ctx := context.Background()
 		src, err := p.peerFor(key.chatID)
 		if err != nil {

@@ -1,6 +1,9 @@
 package main
 
-import "time"
+import (
+	"sort"
+	"time"
+)
 
 // Stats keeps per-source forwarding counts, persisted in data/shift/stats.json.
 type Stats struct {
@@ -38,20 +41,25 @@ func (s *Stats) totals() map[int64]int {
 	return out
 }
 
-// recent returns the newest limit dates with their counts for the source.
+// recent returns the newest limit dates with their counts for the source,
+// oldest to newest (dates sorted so map iteration order cannot shuffle the
+// output).
 func (s *Stats) recent(source int64, limit int) []dayCount {
 	if s == nil {
 		return nil
 	}
-	var out []dayCount
 	var days []string
 	for d := range s.Days {
 		days = append(days, d)
 	}
-	for i := len(days) - 1; i >= 0 && len(out) < limit; i-- {
+	sort.Strings(days)
+	var out []dayCount
+	count := 0
+	for i := len(days) - 1; i >= 0 && count < limit; i-- {
 		d := days[i]
 		if n, ok := s.Days[d][source]; ok {
 			out = append(out, dayCount{Date: d, Count: n})
+			count++
 		}
 	}
 	return out
