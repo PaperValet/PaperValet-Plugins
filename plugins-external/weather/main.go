@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -37,6 +38,70 @@ var Metadata = &plugin.PluginMetadata{
 type WeatherPlugin struct {
 	http *http.Client
 	set  plugin.Settings
+
+	geoMu    sync.Mutex
+	geoCache map[string]geoCacheEntry // name|lang → resolved location
+
+	fcMu    sync.Mutex
+	fcCache map[string]fcCacheEntry // lat,lon → forecast
+}
+
+type geoCacheEntry struct {
+	at  time.Time
+	res *geoResult
+	err error // errNotFound is cached too: it saves the double lookup
+}
+
+type fcCacheEntry struct {
+	at  time.Time
+	fc  *forecast
+	err error
+}
+
+// cacheTTL for geocoding and forecasts: a few minutes make repeated queries
+// of the same city instant while staying fresh enough.
+const cacheTTL = 5 * time.Minute
+
+func (p *WeatherPlugin) geoCached(ctx context.Context, name, lang string) (*geoResult, error) {
+	key := strings.ToLower(name) + "|" + lang
+	p.geoMu.Lock()
+	if e, ok := p.geoCache[key]; ok && time.Since(e.at) < cacheTTL {
+		r, err := e.res, e.err
+		p.geoMu.Unlock()
+		return r, err
+	}
+	p.geoMu.Unlock()
+
+	r, err := p.geocode(ctx, name, lang)
+
+	p.geoMu.Lock()
+	if p.geoCache == nil {
+		p.geoCache = make(map[string]geoCacheEntry)
+	}
+	p.geoCache[key] = geoCacheEntry{at: time.Now(), res: r, err: err}
+	p.geoMu.Unlock()
+	return r, err
+}
+
+func (p *WeatherPlugin) forecastCached(ctx context.Context, loc *geoResult) (*forecast, error) {
+	key := fmt.Sprintf("%.4f,%.4f", loc.Latitude, loc.Longitude)
+	p.fcMu.Lock()
+	if e, ok := p.fcCache[key]; ok && time.Since(e.at) < cacheTTL {
+		f, err := e.fc, e.err
+		p.fcMu.Unlock()
+		return f, err
+	}
+	p.fcMu.Unlock()
+
+	f, err := p.fetchForecast(ctx, loc)
+
+	p.fcMu.Lock()
+	if p.fcCache == nil {
+		p.fcCache = make(map[string]fcCacheEntry)
+	}
+	p.fcCache[key] = fcCacheEntry{at: time.Now(), fc: f, err: err}
+	p.fcMu.Unlock()
+	return f, err
 }
 
 // validCity trims the default city; empty clears it.
@@ -239,7 +304,7 @@ func (p *WeatherPlugin) handleWeather(ctx *plugin.CommandContext) error {
 		name := locationName(loc)
 		_ = ctx.Edit("🌡️ " + ctx.Tlocal("正在获取天气…", "Fetching weather…") + " " + plugin.Code(name))
 		var fc *forecast
-		fc, err = p.fetchForecast(ctx.Context(), loc)
+		fc, err = p.forecastCached(ctx.Context(), loc)
 		if err == nil {
 			return ctx.Edit(buildReport(ctx, fc, name))
 		}
@@ -283,7 +348,7 @@ func (p *WeatherPlugin) resolve(ctx *plugin.CommandContext, input string) (*geoR
 			return nil, errNotFound
 		}
 		tried[strings.ToLower(name)] = true
-		return p.geocode(ctx.Context(), name, lang)
+		return p.geoCached(ctx.Context(), name, lang)
 	}
 	for _, c := range candidates {
 		r, err := tryName(c)
