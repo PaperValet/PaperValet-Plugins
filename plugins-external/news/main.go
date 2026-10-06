@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gotd/td/tg"
@@ -35,6 +36,37 @@ var categories = [][2]string{{"时事", "headlines"}, {"国内", "china"}, {"国
 type NewsPlugin struct {
 	http *http.Client
 	set  plugin.Settings
+
+	cacheMu   sync.Mutex
+	cacheKey  string
+	cacheAt   time.Time
+	cacheData *newsData
+}
+
+// newsCacheTTL: the digest is stable for the whole day; a few minutes keep
+// repeated commands instant while still following panel changes.
+const newsCacheTTL = 5 * time.Minute
+
+// cached fetch: same count+category inside the TTL returns the earlier
+// result without hitting the API again.
+func (p *NewsPlugin) fetchCached(ctx context.Context, count int, cat string) (*newsData, error) {
+	key := fmt.Sprintf("%d|%s", count, cat)
+	p.cacheMu.Lock()
+	if p.cacheData != nil && p.cacheKey == key && time.Since(p.cacheAt) < newsCacheTTL {
+		d := p.cacheData
+		p.cacheMu.Unlock()
+		return d, nil
+	}
+	p.cacheMu.Unlock()
+
+	d, err := p.fetch(ctx, count, cat)
+	if err != nil {
+		return nil, err
+	}
+	p.cacheMu.Lock()
+	p.cacheKey, p.cacheAt, p.cacheData = key, time.Now(), d
+	p.cacheMu.Unlock()
+	return d, nil
 }
 
 func New() *NewsPlugin { return &NewsPlugin{http: &http.Client{Timeout: 15 * time.Second}} }
@@ -119,7 +151,7 @@ func (p *NewsPlugin) handle(ctx *plugin.CommandContext) error {
 		cat = c
 	}
 	_ = ctx.Edit("📰 " + ctx.Tlocal("正在获取今日新闻…", "Fetching today's news…"))
-	d, err := p.fetch(ctx.Context(), p.set.Int("count"), cat)
+	d, err := p.fetchCached(ctx.Context(), p.set.Int("count"), cat)
 	if err != nil {
 		return ctx.Edit("❌ " + ctx.Tlocal("获取失败：", "Fetch failed: ") + plugin.Escape(err.Error()))
 	}
