@@ -84,6 +84,7 @@ func (p *CosplayPlugin) Init(_ context.Context, mgr plugin.Manager) error {
 		UsageEN:     "cosplay [count 1-10] | cosplay help",
 		Plugin:      p.Name(),
 		Category:    "fun",
+		RateLimit:   30, // one run fetches a set + downloads/uploads up to 10 photos
 		Handler:     p.handle,
 	})
 }
@@ -147,8 +148,8 @@ func (p *CosplayPlugin) handle(ctx *plugin.CommandContext) error {
 	}
 
 	_ = ctx.Edit("⏳ " + ctx.Tlocal(
-		fmt.Sprintf("套图 %s 中找到 %d 张，正在下载…", plugin.Bold(plugin.Escape(ps.Title)), len(imgs)),
-		fmt.Sprintf("Found %d photo(s) in %s, downloading…", len(imgs), plugin.Bold(plugin.Escape(ps.Title)))))
+		fmt.Sprintf("套图 %s 中找到 %d 张，正在下载…", plugin.Bold(ps.Title), len(imgs)),
+		fmt.Sprintf("Found %d photo(s) in %s, downloading…", len(imgs), plugin.Bold(ps.Title))))
 
 	files, err := p.download(ctx.Context(), imgs)
 	if err != nil {
