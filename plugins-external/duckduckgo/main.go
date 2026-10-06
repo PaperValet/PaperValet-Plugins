@@ -33,6 +33,9 @@ const (
 	// Telegram caps a message at 4096 UTF-16 units; leave headroom.
 	pageSoftLimit = 3500
 	pageHardLimit = 4000
+
+	// searchAllTimeout bounds the whole html → lite → firecrawl chain.
+	searchAllTimeout = 40 * time.Second
 )
 
 var Metadata = &plugin.PluginMetadata{
@@ -52,15 +55,25 @@ type DuckDuckGoPlugin struct {
 func New() *DuckDuckGoPlugin {
 	return &DuckDuckGoPlugin{http: &http.Client{
 		Timeout: 25 * time.Second,
-		// Never follow redirects to non-DDG hosts silently; DDG itself
-		// answers directly.
+		// Redirects are capped at 3 hops and must stay on a DuckDuckGo
+		// host; DDG itself answers directly. (Only no sensitive headers
+		// travel along, so this is defense in depth.)
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 3 {
+				return http.ErrUseLastResponse
+			}
+			if !isDDGHost(req.URL.Hostname()) {
 				return http.ErrUseLastResponse
 			}
 			return nil
 		},
 	}}
+}
+
+// isDDGHost reports whether a redirect target belongs to DuckDuckGo.
+func isDDGHost(h string) bool {
+	h = strings.ToLower(strings.TrimPrefix(h, "www."))
+	return h == "duckduckgo.com" || strings.HasSuffix(h, ".duckduckgo.com")
 }
 
 func (p *DuckDuckGoPlugin) Name() string        { return "duckduckgo" }
@@ -92,6 +105,7 @@ func (p *DuckDuckGoPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 		UsageEN:     "duckduckgo <query> [-n count 1-15] | duckduckgo help",
 		Plugin:      p.Name(),
 		Category:    "tools",
+		RateLimit:   5,
 		Handler:     p.handleSearch,
 	})
 }
@@ -198,10 +212,15 @@ func (p *DuckDuckGoPlugin) handleSearch(ctx *plugin.CommandContext) error {
 // ---------------------------------------------------------------- search
 
 func (p *DuckDuckGoPlugin) searchAll(ctx context.Context, query string, limit int) bundle {
+	// Overall budget: html → lite → firecrawl each have the client's 25s,
+	// which stacks to over a minute when DDG is slow or blocked.
+	sctx, cancel := context.WithTimeout(ctx, searchAllTimeout)
+	defer cancel()
+
 	var b bundle
 	var collected []result
 
-	res, err := p.fetchDDG(ctx, query, limit)
+	res, err := p.fetchDDG(sctx, query, limit)
 	if len(res) > 0 {
 		b.sources = append(b.sources, "DuckDuckGo")
 		collected = append(collected, res...)
@@ -209,8 +228,8 @@ func (p *DuckDuckGoPlugin) searchAll(ctx context.Context, query string, limit in
 		b.notes = append(b.notes, err.Error())
 	}
 
-	if len(collected) < limit && ctx.Err() == nil {
-		fc, err := p.fetchFirecrawl(ctx, query, limit)
+	if len(collected) < limit && sctx.Err() == nil {
+		fc, err := p.fetchFirecrawl(sctx, query, limit)
 		if len(fc) > 0 {
 			b.sources = append(b.sources, "Firecrawl")
 			collected = append(collected, fc...)
