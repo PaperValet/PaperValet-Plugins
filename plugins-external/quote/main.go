@@ -185,7 +185,7 @@ func (p *QuotePlugin) handleQuote(ctx *plugin.CommandContext) error {
 
 	_ = ctx.Edit(ctx.Tlocal("⏳ 正在收集消息…", "⏳ Collecting messages…"))
 
-	msgs, err := p.collectMessages(ctx, args, isReply)
+	msgs, chats, err := p.collectMessages(ctx, args, isReply)
 	if err != nil {
 		if d, ok := tgerr.AsFloodWait(err); ok {
 			return ctx.Edit("❌ " + ctx.Tlocal(fmt.Sprintf("触发限流，请 %d 秒后重试", int(d.Seconds())), fmt.Sprintf("Flood wait, retry in %ds", int(d.Seconds()))))
@@ -193,7 +193,7 @@ func (p *QuotePlugin) handleQuote(ctx *plugin.CommandContext) error {
 		return ctx.Edit("❌ " + ctx.Tlocal("获取消息失败: ", "failed to load messages: ") + plugin.Escape(err.Error()))
 	}
 
-	qmsgs := p.buildQuoteMessages(ctx, msgs, args)
+	qmsgs := p.buildQuoteMessages(ctx, msgs, chats, args)
 
 	rawMsgs := make([]json.RawMessage, 0, len(qmsgs))
 	for _, qm := range qmsgs {
@@ -308,8 +308,12 @@ func (p *QuotePlugin) sendSticker(ctx *plugin.CommandContext, path string, reply
 	if err != nil {
 		return err
 	}
+	peer, err := ctx.ResolvePeer()
+	if err != nil {
+		return err
+	}
 	req := &tg.MessagesSendMediaRequest{
-		Peer: &tg.InputPeerSelf{},
+		Peer: peer,
 		Media: &tg.InputMediaUploadedDocument{
 			File:     file,
 			MimeType: "image/webp",
@@ -330,14 +334,16 @@ func (p *QuotePlugin) sendSticker(ctx *plugin.CommandContext, path string, reply
 
 // collectMessages gathers the messages to quote: the replied message plus
 // (count-1) following ones, or N before the command when not replying.
-func (p *QuotePlugin) collectMessages(ctx *plugin.CommandContext, args quoteArgs, isReply bool) ([]*tg.Message, error) {
+// Any chats returned alongside the messages are passed back so channel
+// posts can be attributed to the real channel title.
+func (p *QuotePlugin) collectMessages(ctx *plugin.CommandContext, args quoteArgs, isReply bool) ([]*tg.Message, []tg.ChatClass, error) {
 	api := ctx.API
 	if api == nil {
-		return nil, fmt.Errorf("no api")
+		return nil, nil, fmt.Errorf("no api")
 	}
 	peer, err := ctx.ResolvePeer()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	count := args.count
 	if count == 0 {
@@ -345,29 +351,31 @@ func (p *QuotePlugin) collectMessages(ctx *plugin.CommandContext, args quoteArgs
 	}
 
 	var anchor *tg.Message
+	var chats []tg.ChatClass
 	if isReply {
-		msgs, _, _, err := plugin.GetMessages(ctx.Context(), api, peer, ctx.Message.ReplyToID)
+		msgs, _, c, err := plugin.GetMessages(ctx.Context(), api, peer, ctx.Message.ReplyToID)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
+		chats = c
 		for _, m := range msgs {
 			if m.ID == ctx.Message.ReplyToID {
 				anchor = m
 			}
 		}
 		if anchor == nil {
-			return nil, fmt.Errorf("reply message not found")
+			return nil, nil, fmt.Errorf("reply message not found")
 		}
 	}
 
 	if abs(count) <= 1 {
 		if anchor != nil {
-			return []*tg.Message{anchor}, nil
+			return []*tg.Message{anchor}, chats, nil
 		}
 		if ctx.Message != nil && ctx.Message.Message != nil {
-			return []*tg.Message{ctx.Message.Message}, nil
+			return []*tg.Message{ctx.Message.Message}, nil, nil
 		}
-		return nil, fmt.Errorf("no message")
+		return nil, nil, fmt.Errorf("no message")
 	}
 
 	limit := min(abs(count), maxQuoteMessages)
@@ -400,19 +408,19 @@ func (p *QuotePlugin) collectMessages(ctx *plugin.CommandContext, args quoteArgs
 	if innerErr != nil {
 		// fall back to the single anchor/command message
 		if anchor != nil {
-			return []*tg.Message{anchor}, nil
+			return []*tg.Message{anchor}, nil, nil
 		}
-		return []*tg.Message{ctx.Message.Message}, nil
+		return []*tg.Message{ctx.Message.Message}, nil, nil
 	}
 
 	var list []*tg.Message
 	switch v := res.(type) {
 	case *tg.MessagesMessages:
-		list = messagesOf(v.Messages)
+		list, chats = messagesOf(v.Messages), v.Chats
 	case *tg.MessagesMessagesSlice:
-		list = messagesOf(v.Messages)
+		list, chats = messagesOf(v.Messages), v.Chats
 	case *tg.MessagesChannelMessages:
-		list = messagesOf(v.Messages)
+		list, chats = messagesOf(v.Messages), v.Chats
 	case *tg.MessagesMessagesNotModified:
 	}
 	sort.Slice(list, func(a, b int) bool { return list[a].ID < list[b].ID })
@@ -438,11 +446,11 @@ func (p *QuotePlugin) collectMessages(ctx *plugin.CommandContext, args quoteArgs
 	}
 	if len(out) == 0 {
 		if anchor != nil {
-			return []*tg.Message{anchor}, nil
+			return []*tg.Message{anchor}, chats, nil
 		}
-		return []*tg.Message{ctx.Message.Message}, nil
+		return []*tg.Message{ctx.Message.Message}, chats, nil
 	}
-	return out, nil
+	return out, chats, nil
 }
 
 func messagesOf(in []tg.MessageClass) []*tg.Message {
@@ -467,9 +475,10 @@ func abs(n int) int {
 // buildQuoteMessages converts tg messages into the quote-api message model:
 // name, avatar (base64), text + entities, media preview, voice/document/
 // audio rows and reply preview. Field names follow quote-api/generate.js.
-func (p *QuotePlugin) buildQuoteMessages(ctx *plugin.CommandContext, msgs []*tg.Message, args quoteArgs) []*quoteMessage {
+func (p *QuotePlugin) buildQuoteMessages(ctx *plugin.CommandContext, msgs []*tg.Message, chats []tg.ChatClass, args quoteArgs) []*quoteMessage {
 	out := make([]*quoteMessage, 0, len(msgs))
 	users := p.fetchUsers(ctx, msgs)
+	channels := channelNames(chats)
 	for _, m := range msgs {
 		senderID := plugin.SenderID(m)
 		qm := &quoteMessage{
@@ -481,6 +490,12 @@ func (p *QuotePlugin) buildQuoteMessages(ctx *plugin.CommandContext, msgs []*tg.
 		name := "User"
 		if n := userName(users[senderID]); n != "" {
 			name = n
+		} else if ch, ok := m.FromID.(*tg.PeerChannel); ok && channels[ch.ChannelID] != "" {
+			// channel posts: real title from the chats in the response
+			name = channels[ch.ChannelID]
+			if senderID == 0 {
+				qm.ChatID = -ch.ChannelID
+			}
 		} else if ch := channelName(m); ch != "" {
 			name = ch
 		}
@@ -500,7 +515,8 @@ func (p *QuotePlugin) buildQuoteMessages(ctx *plugin.CommandContext, msgs []*tg.
 		case mediaVoice:
 			wf := make([]int, len(info.waveform))
 			for i, b := range info.waveform {
-				wf[i] = min(31, int(b))
+				// waveform bytes are 5-bit amplitudes shifted left by 3
+				wf[i] = min(31, int(b)>>3)
 			}
 			if len(wf) > 0 {
 				qm.Voice = &bridgeVoice{Waveform: wf, Duration: info.duration}
@@ -865,6 +881,25 @@ func (p *QuotePlugin) fetchReplyPreview(ctx *plugin.CommandContext, msgID int) *
 		return rp
 	}
 	return nil
+}
+
+// channelNames extracts channel titles from the chats returned alongside
+// messages (channels are named by the chat object, not a user).
+func channelNames(chats []tg.ChatClass) map[int64]string {
+	out := map[int64]string{}
+	for _, c := range chats {
+		switch v := c.(type) {
+		case *tg.Channel:
+			if v.Title != "" {
+				out[v.ID] = v.Title
+			}
+		case *tg.Chat:
+			if v.Title != "" {
+				out[v.ID] = v.Title
+			}
+		}
+	}
+	return out
 }
 
 func channelName(m *tg.Message) string {

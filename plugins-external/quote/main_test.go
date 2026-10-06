@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/gotd/td/tg"
 )
@@ -275,6 +276,55 @@ func TestTruncVisually(t *testing.T) {
 	}
 }
 
+func TestChannelNames(t *testing.T) {
+	chats := []tg.ChatClass{
+		&tg.Channel{ID: 100, Title: "News"},
+		&tg.Chat{ID: 200, Title: "Old Group"},
+		&tg.ChannelForbidden{ID: 300},
+	}
+	m := channelNames(chats)
+	if m[100] != "News" || m[200] != "Old Group" {
+		t.Errorf("channelNames = %v", m)
+	}
+	if _, ok := m[300]; ok {
+		t.Error("forbidden channel should not be named")
+	}
+}
+
+func TestLimitedWriter(t *testing.T) {
+	var buf bytes.Buffer
+	lw := &limitedWriter{w: &buf, max: 10}
+	if _, err := lw.Write([]byte("12345")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lw.Write([]byte("67890")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lw.Write([]byte("x")); err != errTooLarge {
+		t.Fatalf("want errTooLarge, got %v", err)
+	}
+	if buf.String() != "1234567890" {
+		t.Errorf("buf = %q", buf.String())
+	}
+}
+
+func TestErrBufferRuneSafe(t *testing.T) {
+	var e errBuffer
+	// >8192 bytes ending mid-rune: the kept window must start on a rune
+	// boundary so String() is valid UTF-8.
+	pattern := []byte("你好世界") // 12 bytes
+	for written := 0; written < 8192+24; written += len(pattern) {
+		e.Write(pattern)
+	}
+	e.Write([]byte{0xe4, 0xbd}) // partial 你
+	if !utf8.ValidString(e.String()) {
+		t.Error("errBuffer output is not valid UTF-8")
+	}
+	if len(e.b) > 8192 {
+		t.Errorf("kept %d bytes, want <= 8192", len(e.b))
+	}
+}
+
 func TestClassifyAndDocInfo(t *testing.T) {
 	voiceDoc := &tg.Document{
 		MimeType: "audio/ogg",
@@ -289,13 +339,19 @@ func TestClassifyAndDocInfo(t *testing.T) {
 	if info.duration != 12 || len(info.waveform) != 5 {
 		t.Errorf("info = %+v", info)
 	}
-	// waveform clamp is applied at build time (vendor expects 0..31)
-	clamped := make([]int, len(info.waveform))
+	// waveform decode: bytes are 5-bit amplitudes shifted left by 3
+	decoded := make([]int, len(info.waveform))
 	for i, b := range info.waveform {
-		clamped[i] = min(31, int(b))
+		decoded[i] = min(31, int(b)>>3)
 	}
-	if clamped[2] != 31 || clamped[4] != 31 {
-		t.Errorf("clamp = %v", clamped)
+	if decoded[0] != 0 || decoded[2] != 25 || decoded[3] != 3 || decoded[4] != 12 {
+		t.Errorf("decode = %v", decoded)
+	}
+	// every value stays in 0..31 regardless of the byte
+	for _, v := range decoded {
+		if v < 0 || v > 31 {
+			t.Fatalf("waveform value %d out of range", v)
+		}
 	}
 
 	audioDoc := &tg.Document{

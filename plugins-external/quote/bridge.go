@@ -16,7 +16,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -151,9 +153,16 @@ func ensureBridgeFile(dir string) (string, error) {
 	return dst, nil
 }
 
+// bridgeMu serializes bridge runs: two concurrent quotes must not both run
+// the first-run bootstrap (npm install / asset download / .ready write) in
+// the same data dir at once.
+var bridgeMu sync.Mutex
+
 // runBridge spawns node bridge.mjs, feeds req as JSON on stdin and decodes
 // the framed binary output.
 func runBridge(ctx context.Context, host bridgeHost, req *bridgeRequest) (*bridgeResult, error) {
+	bridgeMu.Lock()
+	defer bridgeMu.Unlock()
 	node := nodeRuntime()
 	if node == "" {
 		return nil, errors.New("node not found — quote 渲染需要 Node.js (node)")
@@ -187,9 +196,10 @@ func runBridge(ctx context.Context, host bridgeHost, req *bridgeRequest) (*bridg
 		if msg == "" {
 			msg = err.Error()
 		}
-		// surface the tail of the stderr (most informative part)
-		if len(msg) > 400 {
-			msg = msg[len(msg)-400:]
+		// surface the tail of the stderr (most informative part),
+		// cut on rune boundaries so multibyte text stays valid UTF-8
+		if r := []rune(msg); len(r) > 400 {
+			msg = string(r[len(r)-400:])
 		}
 		if i := strings.LastIndexByte(msg, '\n'); i >= 0 && i+1 < len(msg) {
 			msg = msg[i+1:]
@@ -202,13 +212,29 @@ func runBridge(ctx context.Context, host bridgeHost, req *bridgeRequest) (*bridg
 	return parseBridgeFrame(out)
 }
 
-// errBuffer keeps the last 8 KiB of stderr.
+// errBuffer keeps the last 8 KiB of stderr, cut on rune boundaries so the
+// string stays valid UTF-8.
 type errBuffer struct{ b []byte }
 
 func (e *errBuffer) Write(p []byte) (int, error) {
 	e.b = append(e.b, p...)
 	if len(e.b) > 8192 {
-		e.b = e.b[len(e.b)-8192:]
+		keep := e.b[len(e.b)-8192:]
+		// drop a partial leading rune (leading continuation bytes)
+		for len(keep) > 0 && !utf8.RuneStart(keep[0]) {
+			keep = keep[1:]
+		}
+		e.b = keep
+	}
+	// drop any incomplete trailing rune (a start byte missing some of its
+	// continuation bytes) so String() is always valid UTF-8
+	for n := len(e.b); n > 0; {
+		r, sz := utf8.DecodeLastRune(e.b[:n])
+		if r != utf8.RuneError || sz > 1 {
+			break
+		}
+		n-- // drop the incomplete byte (0xe4, 0xe4 0xbd, …)
+		e.b = e.b[:n]
 	}
 	return len(p), nil
 }

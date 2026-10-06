@@ -21,13 +21,36 @@ import (
 
 const maxDLSize = 30 << 20 // 30 MB cap for preview downloads
 
+// limitedWriter accepts up to N bytes, then errors so the download stream
+// aborts instead of buffering a file larger than the cap.
+type limitedWriter struct {
+	w   *bytes.Buffer
+	n   int64 // bytes written so far
+	max int64
+}
+
+var errTooLarge = errors.New("file exceeds download cap")
+
+func (l *limitedWriter) Write(p []byte) (int, error) {
+	if l.n+int64(len(p)) > l.max {
+		return 0, errTooLarge
+	}
+	n, err := l.w.Write(p)
+	l.n += int64(n)
+	return n, err
+}
+
 // downloadLocation downloads an input file location to memory (bounded).
 func downloadLocation(ctx context.Context, api *tg.Client, loc tg.InputFileLocationClass, size int64) ([]byte, error) {
 	if size > maxDLSize {
 		return nil, fmt.Errorf("file too large (%d MB)", size>>20)
 	}
 	var buf bytes.Buffer
-	if _, err := downloader.NewDownloader().Download(api, loc).Stream(ctx, &buf); err != nil {
+	lw := &limitedWriter{w: &buf, max: maxDLSize + 1<<20} // small slack for misreported sizes
+	if _, err := downloader.NewDownloader().Download(api, loc).Stream(ctx, lw); err != nil {
+		if errors.Is(err, errTooLarge) {
+			return nil, fmt.Errorf("file too large (over %d MB)", maxDLSize>>20)
+		}
 		return nil, err
 	}
 	return buf.Bytes(), nil
@@ -238,7 +261,7 @@ func fetchMediaPreviewBytes(ctx context.Context, api *tg.Client, m tg.MessageMed
 			ext = ".webm"
 		}
 		loc := &tg.InputDocumentFileLocation{ID: doc.ID, AccessHash: doc.AccessHash, FileReference: doc.FileReference}
-		data, err := downloadLocation(ctx, api, loc, min(doc.Size, int64(maxDLSize)))
+		data, err := downloadLocation(ctx, api, loc, doc.Size)
 		if err != nil {
 			return nil
 		}
