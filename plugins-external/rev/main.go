@@ -18,9 +18,12 @@ import (
 )
 
 const (
-	tempDir      = "data/rev/tmp"
 	maxMediaSize = 50 << 20 // refuse to download anything bigger
 )
+
+// tempDir is derived from the plugin DataDir in Init; the fallback keeps the
+// old relative path (tests / no host).
+var tempDir = "data/rev/tmp"
 
 type RevPlugin struct{}
 
@@ -42,6 +45,11 @@ func (p *RevPlugin) Description() string {
 func (p *RevPlugin) DescEN() string { return "Reverse text (keeps formatting) or flip/invert media" }
 
 func (p *RevPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
+	if mgr != nil && mgr.Host() != nil {
+		if dir, err := mgr.Host().DataDir("rev"); err == nil && dir != "" {
+			tempDir = filepath.Join(dir, "tmp")
+		}
+	}
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "rev",
 		Description: "反转文字（逐行，保留格式）；回复图片/GIF/贴纸可翻转或反色",
