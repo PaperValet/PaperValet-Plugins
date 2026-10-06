@@ -59,10 +59,38 @@ func TestValidateStickerSet(t *testing.T) {
 	if s, err := validateStickerSet(""); err != nil || s != "" {
 		t.Fatalf("empty must be allowed: %q %v", s, err)
 	}
-	for _, bad := range []string{"my pack", "my-pack", "中文", strings.Repeat("a", 65), "a.b"} {
+	for _, bad := range []string{"my pack", "my-pack", "中文", strings.Repeat("a", 65), "a.b",
+		"1pack", "9_digits", "_lead"} { // digits/underscore start → STICKERSET_INVALID at runtime
 		if _, err := validateStickerSet(bad); err == nil {
 			t.Errorf("%q should be rejected", bad)
 		}
+	}
+	if _, err := validateStickerSet("a"); err != nil {
+		t.Errorf("single letter should pass: %v", err)
+	}
+}
+
+// TestBuildItemsCheckedSender guards the source's "no sender" failure branch.
+func TestBuildItemsCheckedSender(t *testing.T) {
+	e := &msgEnv{users: map[int64]*tg.User{}, chats: map[int64]tg.ChatClass{}}
+	// no FromID, no PeerID user, no forward header → error
+	bad := &tg.Message{ID: 1, Message: "hi"}
+	if _, err := buildItemsChecked(e, []*tg.Message{bad}, yvluArgs{}, nil); err == nil {
+		t.Fatal("unresolvable sender should fail")
+	}
+	// a forward header rescues it
+	fwd := &tg.Message{ID: 2, Message: "hi", FwdFrom: tg.MessageFwdHeader{FromName: "Somewhere"}}
+	if _, err := buildItemsChecked(e, []*tg.Message{fwd}, yvluArgs{}, nil); err != nil {
+		t.Fatalf("forwarded message should pass: %v", err)
+	}
+	// a private-chat peer counts as the sender
+	peerMsg := &tg.Message{ID: 3, Message: "hi", PeerID: &tg.PeerUser{UserID: 7}}
+	if _, err := buildItemsChecked(e, []*tg.Message{peerMsg}, yvluArgs{}, nil); err == nil {
+		t.Fatal("peer user without users cache should fail (no access hash to fetch)")
+	}
+	e2 := &msgEnv{users: map[int64]*tg.User{7: {ID: 7, FirstName: "A"}}, chats: map[int64]tg.ChatClass{}}
+	if _, err := buildItemsChecked(e2, []*tg.Message{peerMsg}, yvluArgs{}, nil); err != nil {
+		t.Fatalf("cached peer user should pass: %v", err)
 	}
 }
 

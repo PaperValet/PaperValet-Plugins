@@ -22,6 +22,9 @@ import (
 const (
 	maxCount     = 5
 	quoteTimeout = 90 * time.Second
+
+	// quoteAPIHost is shown in help so users know where their data goes.
+	quoteAPIHost = "quote-api-enhanced.zhetengsha.eu.org"
 )
 
 var Metadata = &plugin.PluginMetadata{
@@ -49,10 +52,11 @@ func (p *YvluPlugin) Name() string        { return Metadata.Name }
 func (p *YvluPlugin) Description() string { return Metadata.Description }
 func (p *YvluPlugin) DescEN() string      { return Metadata.DescEN }
 
-var stickerSetRe = regexp.MustCompile(`^[a-zA-Z0-9_]{1,64}$`)
+var stickerSetRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]{0,63}$`)
 
 // validateStickerSet normalizes the pack short name typed in the settings
-// panel; an empty value clears the setting.
+// panel; an empty value clears the setting. Telegram short names must start
+// with a letter (STICKERSET_INVALID otherwise).
 func validateStickerSet(s string) (string, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -60,8 +64,8 @@ func validateStickerSet(s string) (string, error) {
 	}
 	if !stickerSetRe.MatchString(s) {
 		return "", plugin.Invalid(
-			"贴纸包名称只能包含字母、数字和下划线（1-64 字符）",
-			"Pack names may only contain letters, digits and underscores (1-64 chars)")
+			"贴纸包名称必须以字母开头，只能包含字母、数字和下划线（1-64 字符）",
+			"Pack names must start with a letter; letters, digits and underscores only (1-64 chars)")
 	}
 	return s, nil
 }
@@ -75,8 +79,8 @@ func (p *YvluPlugin) Init(_ context.Context, mgr plugin.Manager) error {
 		TitleEN: "💬 Quote maker",
 		Settings: []plugin.Setting{{
 			Key: "stickerSet", Label: "贴纸包名称", LabelEN: "Sticker pack name",
-			Hint:   "yvlu s 保存贴纸的目标贴纸包 shortName，不存在时自动创建；仅字母、数字、下划线",
-			HintEN: "Target pack shortName for yvlu s, auto-created when missing; letters, digits and underscores only",
+			Hint:   "yvlu s 保存贴纸的目标贴纸包 shortName，不存在时自动创建；字母开头，仅字母、数字、下划线",
+			HintEN: "Target pack shortName for yvlu s, auto-created when missing; starts with a letter, letters/digits/underscores only",
 			Kind:   plugin.SettingText, Default: "",
 			Validate: validateStickerSet,
 		}},
@@ -208,6 +212,7 @@ func (p *YvluPlugin) help(ctx *plugin.CommandContext) string {
 			"• 组合："+plugin.Code("yvlu r image 3")+"\n\n"+
 			"**存入贴纸包**\n"+
 			"• "+plugin.Code("yvlu s")+" 回复贴纸/图片，存入面板配置的贴纸包（不存在则自动创建）\n\n"+
+			"⚠️ "+plugin.Code("yvlu")+" 生成需把消息文本/头像/媒体发送到第三方 quote-api 服务（"+quoteAPIHost+"）\n\n"+
 			"💡 回复时选中部分文字可只引用该片段",
 		"💬 **Quote maker**\n\n"+
 			"**Basics**\n"+
@@ -221,6 +226,7 @@ func (p *YvluPlugin) help(ctx *plugin.CommandContext) string {
 			"• combine: "+plugin.Code("yvlu r image 3")+"\n\n"+
 			"**Save to a pack**\n"+
 			"• "+plugin.Code("yvlu s")+" reply to a sticker/photo to store it in the pack set in the panel (created when missing)\n\n"+
+			"⚠️ "+plugin.Code("yvlu")+" sends the message text/avatar/media to a third-party quote-api service ("+quoteAPIHost+")\n\n"+
 			"💡 Reply with a text selection to quote just that fragment")
 }
 

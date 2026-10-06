@@ -4,8 +4,11 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -74,18 +77,25 @@ func (p *YvluPlugin) handleSave(ctx *plugin.CommandContext) error {
 	_ = ctx.Edit("🔄 " + ctx.Tlocal("正在处理...", "Processing..."))
 
 	// Prepare the sticker document: stickers are reused via inputDocument;
-	// photos are downloaded, uploaded as sticker files and wrapped.
+	// photos are converted to a 512-side WebP (Telegram's static sticker
+	// dimension rule) before uploading.
 	var inputDoc tg.InputDocumentClass
 	switch {
 	case doc != nil:
 		inputDoc = &tg.InputDocument{ID: doc.ID, AccessHash: doc.AccessHash, FileReference: doc.FileReference}
 	default:
-		path, err := p.tempDownload(ctx, photoLoc)
+		src, err := p.tempDownload(ctx, photoLoc)
 		if err != nil {
 			return ctx.Edit("❌ " + ctx.Tlocal("下载图片失败: ", "Failed to download the photo: ") + plugin.Escape(describeErr(err)))
 		}
-		defer os.Remove(path)
-		docUploaded, err := uploadStickerDoc(ctx, path, "image/jpeg")
+		defer os.Remove(src)
+		stickerPath, err := p.convertToStickerWebP(ctx.Context(), src)
+		if err != nil {
+			os.Remove(stickerPath)
+			return ctx.Edit("❌ " + ctx.Tlocal("图片转贴纸失败（需要 ffmpeg）: ", "Photo→sticker conversion failed (ffmpeg required): ") + plugin.Escape(describeErr(err)))
+		}
+		defer os.Remove(stickerPath)
+		docUploaded, err := uploadStickerDoc(ctx, stickerPath, "image/webp")
 		if err != nil {
 			return ctx.Edit("❌ " + ctx.Tlocal("上传贴纸失败: ", "Failed to upload the sticker: ") + plugin.Escape(describeErr(err)))
 		}
@@ -117,10 +127,51 @@ func (p *YvluPlugin) handleSave(ctx *plugin.CommandContext) error {
 		}
 	}
 
-	link := plugin.Link(plugin.Escape(pack), "https://t.me/addstickers/"+pack)
+	link := plugin.Link(pack, "https://t.me/addstickers/"+pack)
 	return ctx.Edit("✅ " + ctx.Tlocal(
 		fmt.Sprintf("已保存到贴纸包 %s", link),
 		fmt.Sprintf("Saved to the pack %s", link)))
+}
+
+// convertToStickerWebP pads src onto a 512×512 transparent canvas and
+// re-encodes as WebP — Telegram rejects static stickers whose sides are not
+// 512×N / N×512 (STICKER_PNG_DIMENSIONS), so a raw photo upload always fails.
+// Returns the output path; the file is the caller's to remove.
+func (p *YvluPlugin) convertToStickerWebP(ctx context.Context, src string) (string, error) {
+	bin, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return "", errors.New("ffmpeg not found")
+	}
+	out := filepath.Join(p.tmp(), fmt.Sprintf("sticker_%d.webp", time.Now().UnixNano()))
+	c, cancel := context.WithTimeout(ctx, convertTimeout)
+	defer cancel()
+	args := []string{
+		"-hide_banner", "-loglevel", "error", "-y",
+		"-i", src,
+		"-vf", "scale=512:512:force_original_aspect_ratio=decrease," +
+			"pad=512:512:(ow-iw)/2:(oh-ih)/2:color=black@0,format=yuva420p",
+		"-c:v", "libwebp", "-lossless", "0", "-q:v", "90", "-frames:v", "1",
+		out,
+	}
+	if outb, err := exec.CommandContext(c, bin, args...).CombinedOutput(); err != nil {
+		msg := strings.TrimSpace(string(outb))
+		if i := strings.IndexByte(msg, '\n'); i > 0 {
+			msg = msg[:i]
+		}
+		if msg == "" {
+			msg = err.Error()
+		}
+		if c.Err() != nil {
+			msg = "timeout"
+		}
+		os.Remove(out)
+		return "", fmt.Errorf("ffmpeg: %s", msg)
+	}
+	if st, err := os.Stat(out); err != nil || st.Size() == 0 {
+		os.Remove(out)
+		return "", errors.New("ffmpeg produced no output")
+	}
+	return out, nil
 }
 
 // tempDownload downloads a file location into a fresh temp file.

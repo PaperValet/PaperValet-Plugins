@@ -437,14 +437,19 @@ func buildItems(e *msgEnv, msgs []*tg.Message, opts yvluArgs, frag *quotedFragme
 	return items
 }
 
-// buildItemsChecked wraps buildItems: it fails when no message yielded a
-// usable sender (mirrors the source's "无法获取消息发送者信息").
+// buildItemsChecked wraps buildItems: it fails when a message yielded no
+// usable sender and carries no forward header (mirrors the source's
+// "无法获取消息发送者信息"); the synthesized hash id would silently merge
+// unrelated senders in the renderer.
 func buildItemsChecked(e *msgEnv, msgs []*tg.Message, opts yvluArgs, frag *quotedFragment) ([]quoteMessage, error) {
-	items := buildItems(e, msgs, opts, frag)
-	if len(items) == 0 {
-		return nil, errors.New("no messages to quote")
+	for _, msg := range msgs {
+		if _, _, serr := e.senderOf(msg); serr != nil {
+			if _, fwd := forwardHeader(msg); !fwd {
+				return nil, errors.New("无法获取消息发送者信息 / cannot resolve the message sender")
+			}
+		}
 	}
-	return items, nil
+	return buildItems(e, msgs, opts, frag), nil
 }
 
 func buildItem(e *msgEnv, msg *tg.Message, opts yvluArgs, frag *quotedFragment, idx int, prevSender *string) quoteMessage {
