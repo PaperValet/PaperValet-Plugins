@@ -22,8 +22,30 @@ const (
 )
 
 // packPages packs whole lines into pages; page 0 carries the header.
+// A single line longer than a page (a giant Pre block of PTR records,
+// say) is split at whitespace so no page can exceed Telegram's cap and
+// fail the edit outright.
 func packPages(header string, lines []string) []string {
 	var pages []string
+	split := make([]string, 0, len(lines))
+	for _, ln := range lines {
+		if len(ln) <= pageHardLimit {
+			split = append(split, ln)
+			continue
+		}
+		for len(ln) > pageSoftLimit {
+			cut := strings.LastIndexByte(ln[:pageSoftLimit], ' ')
+			if cut < pageSoftLimit/2 {
+				cut = pageSoftLimit
+			}
+			split = append(split, strings.TrimRight(ln[:cut], " "))
+			ln = strings.TrimLeft(ln[cut:], " ")
+		}
+		if ln != "" {
+			split = append(split, ln)
+		}
+	}
+	lines = split
 	cur := header
 	flush := func() {
 		if cur != "" {

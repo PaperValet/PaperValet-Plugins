@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gotd/td/tg"
@@ -65,19 +66,29 @@ func (p *BgpPlugin) runNet(ctx *plugin.CommandContext, query, hostIP string, exp
 	defer cancel()
 
 	// Cymru gives registry data and, for an IP, its covering prefix.
+	// The Cymru dial and the RIPEstat network-info call run in parallel —
+	// together they dominated the serial latency of the whole query.
 	var cy cymruRecord
 	var cyErr error
-	if hostIP != "" {
-		cy, cyErr = cymruLookup(qctx, hostIP)
-	} else if _, ipnet, err := net.ParseCIDR(query); err == nil {
-		cy, cyErr = cymruLookup(qctx, ipnet.String())
-	} else {
-		cyErr = errors.New("unreachable")
-	}
+	cyDone := make(chan struct{})
+	go func() {
+		defer close(cyDone)
+		switch {
+		case hostIP != "":
+			cy, cyErr = cymruLookup(qctx, hostIP)
+		default:
+			if _, ipnet, err := net.ParseCIDR(query); err == nil {
+				cy, cyErr = cymruLookup(qctx, ipnet.String())
+			} else {
+				cyErr = errors.New("unreachable")
+			}
+		}
+	}()
 
 	// RIPEstat: covering prefix + origins, then routing state and paths.
 	var ni networkInfo
 	niErr := p.http.ripeGet(qctx, "network-info", orStr(hostIP, query), &ni)
+	<-cyDone
 
 	prefix := ni.Prefix
 	if prefix == "" {
@@ -135,17 +146,25 @@ func (p *BgpPlugin) runASN(ctx *plugin.CommandContext, asn int) error {
 	qctx, cancel := context.WithTimeout(ctx.Context(), 60*time.Second)
 	defer cancel()
 
+	// All four sources are independent; fetching them in parallel halves
+	// the worst-case latency under the shared qctx deadline.
 	var (
 		ov    asOverview
 		nb    neighboursData
 		ap    announcedPrefixes
 		cy    cymruRecord
-		ovErr = p.http.ripeGet(qctx, "as-overview", asnStr, &ov)
-		nbErr = p.http.ripeGet(qctx, "asn-neighbours", asnStr, &nb)
-		apErr = p.http.ripeGet(qctx, "announced-prefixes", asnStr, &ap)
+		ovErr error
+		nbErr error
+		apErr error
 		cyErr error
+		wg    sync.WaitGroup
 	)
-	cy, cyErr = cymruLookup(qctx, asnStr)
+	wg.Add(4)
+	go func() { defer wg.Done(); ovErr = p.http.ripeGet(qctx, "as-overview", asnStr, &ov) }()
+	go func() { defer wg.Done(); nbErr = p.http.ripeGet(qctx, "asn-neighbours", asnStr, &nb) }()
+	go func() { defer wg.Done(); apErr = p.http.ripeGet(qctx, "announced-prefixes", asnStr, &ap) }()
+	go func() { defer wg.Done(); cy, cyErr = cymruLookup(qctx, asnStr) }()
+	wg.Wait()
 
 	return deliver(ctx, renderASN(ctx, asn, ov, ovErr, nb, nbErr, len(ap.Prefixes), apErr, cy, cyErr))
 }
@@ -230,6 +249,12 @@ func (p *BgpPlugin) tryGraph(ctx *plugin.CommandContext, hostIP, query string) {
 
 	svg, prefix, err := p.fetchGraphSVG(gctx, ip)
 	if err != nil {
+		// Not fatal — the text answer already says the graph is
+		// best-effort — but a silent login-wall would look like the
+		// feature vanished, so leave a trace.
+		if p.log != nil {
+			p.log.Debug("bgp: route graph unavailable", "ip", hostIP, "error", err)
+		}
 		return
 	}
 	dir, err := os.MkdirTemp("", "bgp-")

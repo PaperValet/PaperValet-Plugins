@@ -23,6 +23,7 @@ var Metadata = &plugin.PluginMetadata{
 
 type BgpPlugin struct {
 	http *client
+	log  plugin.Logger
 }
 
 func New() *BgpPlugin {
@@ -34,6 +35,9 @@ func (p *BgpPlugin) Description() string { return Metadata.Description }
 func (p *BgpPlugin) DescEN() string      { return Metadata.DescEN }
 
 func (p *BgpPlugin) Init(_ context.Context, mgr plugin.Manager) error {
+	if host := mgr.Host(); host != nil {
+		p.log = host.Logger(p.Name())
+	}
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "bgp",
 		Description: "查询 IP、前缀或 AS 的 BGP 路由信息（起源、路径、DNS、路由图）",

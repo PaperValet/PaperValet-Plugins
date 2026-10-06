@@ -277,6 +277,26 @@ func TestPackPages(t *testing.T) {
 	}
 }
 
+// A single line longer than a page (a huge Pre block of PTR records) must
+// be split so every page stays under the cap, instead of producing an
+// over-limit page that fails the edit.
+func TestPackPagesGiantLine(t *testing.T) {
+	giant := strings.Repeat("a", 9000)
+	pages := packPages("HEADER", []string{giant})
+	if len(pages) < 2 {
+		t.Fatalf("giant line not split: %d pages", len(pages))
+	}
+	for i, pg := range pages {
+		if len(pg) > pageHardLimit {
+			t.Errorf("page %d over the hard limit: %d", i, len(pg))
+		}
+	}
+	joined := strings.ReplaceAll(strings.Join(pages, ""), "\n", "")
+	if !strings.Contains(joined, strings.Repeat("a", 100)) {
+		t.Error("content lost while splitting")
+	}
+}
+
 func TestPackPagesSingle(t *testing.T) {
 	pages := packPages("H", []string{"a", "b"})
 	if len(pages) != 1 || pages[0] != "H\na\nb" {
