@@ -276,17 +276,18 @@ func displayName(u *tg.User) string {
 
 // chunkMentions splits mentions into Markdown messages, each starting with
 // header and holding at most maxCount mentions / roughly maxLen visible
-// characters. The header is plain text and gets escaped here.
+// characters. Length is measured on the rendered Mention markdown (escape
+// backslashes included), so exotic names cannot blow past the limit.
 func chunkMentions(admins []admin, header string, maxLen, maxCount int) []string {
 	var chunks []string
 	var cur strings.Builder
 	curLen, count := 0, 0
 	hdr := plugin.Escape(header)
-	hdrLen := utf8.RuneCountInString(header)
+	hdrLen := len(hdr)
 	const sep = " , "
 	for _, a := range admins {
 		m := plugin.Mention(a.Name, a.ID)
-		mLen := utf8.RuneCountInString(a.Name)
+		mLen := len(m) // rendered length: escapes and link included
 		addLen := mLen
 		if count > 0 {
 			addLen += len(sep)
@@ -300,9 +301,12 @@ func chunkMentions(admins []admin, header string, maxLen, maxCount int) []string
 		if count >= maxCount || curLen+addLen > maxLen {
 			chunks = append(chunks, cur.String())
 			cur.Reset()
-			cur.WriteString(hdr)
+			// Continuation chunks carry only a short marker; repeating
+			// the (up to 200 char) header on every chunk floods the chat.
+			cont := "…\n\n"
+			cur.WriteString(cont)
 			cur.WriteString(m)
-			curLen, count = hdrLen+mLen, 1
+			curLen, count = len(cont)+mLen, 1
 			continue
 		}
 		cur.WriteString(sep)
