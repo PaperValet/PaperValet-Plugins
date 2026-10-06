@@ -27,6 +27,15 @@ func TestTally(t *testing.T) {
 	if !strings.Contains(out, "50.00%") || !strings.Contains(out, "first 10k") {
 		t.Fatal(out)
 	}
+	// Unreadable participants are counted as missing and noted, not silent.
+	tl.Missing = 4
+	if out := report(en, tl, false); !strings.Contains(out, "4 members could not be read") {
+		t.Fatal(out)
+	}
+	tl.Missing = 0
+	if out := report(en, tl, false); strings.Contains(out, "could not be read") {
+		t.Fatal("missing note shown with zero missing")
+	}
 }
 
 func TestParticipantIDs(t *testing.T) {

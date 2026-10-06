@@ -16,6 +16,12 @@ import (
 const (
 	pageSize  = 200
 	hardLimit = 10000 // Telegram stops listing members past this offset
+	// pageGap paces getParticipants so a large scan does not immediately
+	// trip a FLOOD_WAIT.
+	pageGap = 150 * time.Millisecond
+	// maxFloodRetries bounds how many sub-minute FLOOD_WAITs one scan
+	// waits out before giving up (a longer wait is a hard stop anyway).
+	maxFloodRetries = 3
 )
 
 var Metadata = &plugin.PluginMetadata{
@@ -44,7 +50,11 @@ func (p *PremiumPlugin) Init(_ context.Context, mgr plugin.Manager) error {
 		UsageEN:     "premium [force]",
 		Plugin:      p.Name(),
 		Category:    "group",
-		Handler:     p.handle,
+		// A full scan of a large group is minutes of API calls; keep it
+		// owner-initiated and not spam-triggerable in groups.
+		OwnerOnly: true,
+		RateLimit: 60,
+		Handler:   p.handle,
 	})
 }
 
@@ -52,10 +62,12 @@ func (p *PremiumPlugin) Start(context.Context) error { return nil }
 func (p *PremiumPlugin) Stop(context.Context) error  { return nil }
 
 // tally is the result of one scan. seen dedupes members, since the recent
-// list can shift between pages while a large group is scanned.
+// list can shift between pages while a large group is scanned. missing
+// counts participants whose user object was not in the page, so the report
+// can say the numbers are slightly low instead of lying silently.
 type tally struct {
-	Premium, Users, Bots, Deleted, Seen int
-	seen                                map[int64]bool
+	Premium, Users, Bots, Deleted, Seen, Missing int
+	seen                                         map[int64]bool
 }
 
 func (t *tally) add(u *tg.User) {
@@ -153,12 +165,14 @@ func (p *PremiumPlugin) handle(ctx *plugin.CommandContext) error {
 
 func scanChannel(ctx *plugin.CommandContext, ch *tg.InputChannel, t *tally) error {
 	last := time.Now()
+	floods := 0
 	for offset := 0; offset < hardLimit; {
 		res, err := ctx.API.ChannelsGetParticipants(ctx.Context(), &tg.ChannelsGetParticipantsRequest{
 			Channel: ch, Filter: &tg.ChannelParticipantsRecent{}, Offset: offset, Limit: pageSize,
 		})
 		if err != nil {
-			if d, ok := tgerr.AsFloodWait(err); ok && d < time.Minute {
+			if d, ok := tgerr.AsFloodWait(err); ok && d < time.Minute && floods < maxFloodRetries {
+				floods++
 				select {
 				case <-ctx.Context().Done():
 					return ctx.Context().Err()
@@ -168,6 +182,7 @@ func scanChannel(ctx *plugin.CommandContext, ch *tg.InputChannel, t *tally) erro
 			}
 			return err
 		}
+		floods = 0
 		ps, ok := res.(*tg.ChannelsChannelParticipants)
 		if !ok {
 			return nil
@@ -176,14 +191,25 @@ func scanChannel(ctx *plugin.CommandContext, ch *tg.InputChannel, t *tally) erro
 		// count only ids that appear as participants.
 		users := usersByID(ps.Users)
 		for _, part := range ps.Participants {
-			if u, ok := users[channelParticipantID(part)]; ok {
+			id := channelParticipantID(part)
+			if id == 0 {
+				continue
+			}
+			if u, ok := users[id]; ok {
 				t.add(u)
+			} else if !t.seen[id] {
+				t.Missing++
 			}
 		}
 		n := len(ps.Participants)
 		offset += n
 		if n == 0 || offset >= ps.Count {
 			return nil
+		}
+		select {
+		case <-ctx.Context().Done():
+			return ctx.Context().Err()
+		case <-time.After(pageGap):
 		}
 		if time.Since(last) > 3*time.Second {
 			last = time.Now()
@@ -236,6 +262,9 @@ func report(tl func(string, string) string, t tally, truncated bool) string {
 		t.Premium, t.Users, t.percent(), t.Bots, t.Deleted, t.Seen)
 	if truncated {
 		s += "\n\n⚠️ " + tl("Telegram 只允许遍历前 1 万人，数据可能不完整", "Telegram only lists the first 10k members, so this may be incomplete")
+	}
+	if t.Missing > 0 {
+		s += "\n\n⚠️ " + fmt.Sprintf(tl("另有 %d 个成员信息缺失，未计入统计", "%d members could not be read and are not counted"), t.Missing)
 	}
 	return s
 }
