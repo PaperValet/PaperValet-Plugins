@@ -153,22 +153,78 @@ func fetchAlbum(ctx context.Context, api *tg.Client, info *chatInfo, msg *tg.Mes
 	if !ok || gid == 0 {
 		return []*tg.Message{msg}, nil
 	}
-	var ids []int
-	for id := msg.ID - 10; id <= msg.ID+10; id++ {
-		if id > 0 {
-			ids = append(ids, id)
+	// Albums live close together in id space, but the initial ±10 window
+	// truncated albums whose members are interleaved with other messages or
+	// carry larger id gaps. Widen the window while a group member sits on
+	// its edge; fetch only newly covered ids, in getMessages-sized batches.
+	const batch = 100
+	have := map[int]*tg.Message{}
+	fetch := func(ids []int) error {
+		for len(ids) > 0 {
+			n := min(len(ids), batch)
+			got, err := fetchMessages(ctx, api, info, ids[:n])
+			if err != nil {
+				return err
+			}
+			for id, m := range got {
+				have[id] = m
+			}
+			ids = ids[n:]
 		}
+		return nil
 	}
-	got, err := fetchMessages(ctx, api, info, ids)
-	if err != nil {
+	lo, hi := msg.ID-10, msg.ID+10
+	if lo < 1 {
+		lo = 1
+	}
+	var first []int
+	for id := lo; id <= hi; id++ {
+		first = append(first, id)
+	}
+	if err := fetch(first); err != nil {
 		return nil, err
 	}
-	var out []*tg.Message
-	for _, id := range ids {
-		if m, ok := got[id]; ok {
-			if g, ok := m.GetGroupedID(); ok && g == gid {
-				out = append(out, m)
+	inGroup := func(id int) bool {
+		m, ok := have[id]
+		if !ok {
+			return false
+		}
+		g, ok := m.GetGroupedID()
+		return ok && g == gid
+	}
+	for {
+		// Widen only past an edge that is itself a group member; a gap
+		// inside the album is fine, and no member at the edge means the
+		// album ended there.
+		var fresh []int
+		if inGroup(lo) && lo > 1 {
+			nlo := lo - 50
+			if nlo < 1 {
+				nlo = 1
 			}
+			for id := lo - 1; id >= nlo; id-- {
+				fresh = append(fresh, id)
+			}
+			lo = nlo
+		}
+		if inGroup(hi) {
+			nhi := hi + 50
+			for id := hi + 1; id <= nhi; id++ {
+				fresh = append(fresh, id)
+			}
+			hi = nhi
+		}
+		if len(fresh) == 0 || hi-lo > 500 {
+			break
+		}
+		if err := fetch(fresh); err != nil {
+			return nil, err
+		}
+	}
+	var out []*tg.Message
+	for id := lo; id <= hi; id++ {
+		if inGroup(id) {
+			out = append(out, have[id])
 		}
 	}
 	if len(out) == 0 {

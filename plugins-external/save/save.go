@@ -480,13 +480,18 @@ func (j *job) resend(m *tg.Message, prefix string) (int, error) {
 		// Fallback: send as a plain file.
 		req.Media, req.RandomID = plain, randomID()
 		if err2 := j.call(func() (e error) { upd, e = j.api.MessagesSendMedia(j.jctx, req); return }); err2 != nil {
-			return 0, err
+			// Keep both: why the media send was rejected and why the plain
+			// fallback failed, so rejections are diagnosable.
+			return 0, fmt.Errorf("%w; plain-file fallback: %v", err, err2)
 		}
 	}
 	id := sentID(upd)
 	if extraText {
-		if tid, err := j.sendText(text, ents, id, true); err == nil {
-			id = tid
+		// The overflow text is sent as a reply to the media; lastSent must
+		// stay the media id so the source card replies to the media, not
+		// to this text follow-up.
+		if _, err := j.sendText(text, ents, id, true); err != nil {
+			j.fail(fmt.Sprintf("#%d", m.ID), err)
 		}
 	}
 	return id, nil

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -263,6 +264,13 @@ func targetLabel(t string, tl func(string, string) string) string {
 	return t
 }
 
+// parseTargetID reads a bare numeric chat id; the whole token must be a
+// number (fmt.Sscan accepted trailing garbage like "123abc").
+func parseTargetID(t string) (int64, bool) {
+	id, err := strconv.ParseInt(strings.TrimSpace(t), 10, 64)
+	return id, err == nil
+}
+
 // resolveTarget turns a normalized target into an InputPeer and label.
 func resolveTarget(ctx *plugin.CommandContext, t string) (tg.InputPeerClass, string, error) {
 	tl := ctx.Tlocal
@@ -275,8 +283,8 @@ func resolveTarget(ctx *plugin.CommandContext, t string) (tg.InputPeerClass, str
 		peer, err := ctx.PeerResolver.ResolveUsername(ctx.Context(), t[1:])
 		return peer, t, err
 	}
-	var id int64
-	if _, err := fmt.Sscan(t, &id); err != nil {
+	id, ok := parseTargetID(t)
+	if !ok {
 		return nil, "", fmt.Errorf("invalid target %s", t)
 	}
 	if id == ctx.SelfID && id != 0 {

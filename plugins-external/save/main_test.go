@@ -239,6 +239,20 @@ func TestStopIdempotent(t *testing.T) {
 	}
 }
 
+func TestParseTargetID(t *testing.T) {
+	for _, s := range []string{"123456", "-1001234567890", " 42 "} {
+		if id, ok := parseTargetID(s); !ok || (s == " 42 " && id != 42) {
+			t.Errorf("parseTargetID(%q) = %d %v, want ok", s, id, ok)
+		}
+	}
+	// Sscanf("%d") used to accept these and resolve a garbage peer.
+	for _, s := range []string{"123abc", "abc", "", "12 34"} {
+		if _, ok := parseTargetID(s); ok {
+			t.Errorf("parseTargetID(%q) accepted garbage", s)
+		}
+	}
+}
+
 func TestPanelTargetValidation(t *testing.T) {
 	for _, ok := range []string{"me", "local", "@user", "123456", "-1001234567890", "https://t.me/durov"} {
 		if _, err := validPanelTarget(ok); err != nil {
