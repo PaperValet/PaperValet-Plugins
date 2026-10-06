@@ -14,6 +14,7 @@ import (
 	_ "time/tzdata" // timezone names work without system tzdata
 
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 
 	"github.com/TiaraBasori/PaperValet/pkg/plugin"
 )
@@ -24,6 +25,10 @@ const (
 	noAPIRetry   = 30 * time.Second // retry when no API client is known yet
 	overdueGrace = 24 * time.Hour   // missed one-shot tasks older than this are dropped
 	maxMsgLen    = 4096
+	sendRetry    = time.Minute      // backoff before retrying a failed send
+	maxBackoff   = 15 * time.Minute // cap for the retry backoff (FLOOD_WAIT aware)
+	saveDebounce = 30 * time.Second // coalesce accounting-only disk writes
+	catchUpGap   = 2 * time.Second  // stagger between catch-up one-shot sends
 )
 
 var Metadata = &plugin.PluginMetadata{
@@ -46,6 +51,12 @@ type SendAtPlugin struct {
 	resolver plugin.PeerResolver
 	logger   plugin.Logger
 	set      plugin.Settings
+
+	// dirtyPending marks accounting-only changes (Count/LastRun/LastError)
+	// that still need a disk write; saveAt is when the debounced write is
+	// due. Structural changes (add/remove/pause) always save immediately.
+	dirtyPending bool
+	saveAt       time.Time
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -70,6 +81,14 @@ func (p *SendAtPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 			p.mu.Lock()
 			p.api, p.resolver, p.logger = host.API(), host.PeerResolver(), host.Logger(p.Name())
 			p.mu.Unlock()
+			// Persistent state lives under the host data dir, like every
+			// other plugin; the compile-time default is only a test/CLI
+			// fallback so tasks survive a CWD change.
+			if dir, err := host.DataDir(p.Name()); err == nil {
+				p.mu.Lock()
+				p.dir = dir
+				p.mu.Unlock()
+			}
 		}
 	}
 	if host != nil {
@@ -167,7 +186,31 @@ func (p *SendAtPlugin) applyPanelZone() {
 	}
 }
 
-// Stop halts the scheduler and waits for it to exit.
+// markDirtyLocked schedules a debounced disk write for accounting-only
+// changes; the scheduler loop performs the write when saveAt passes.
+func (p *SendAtPlugin) markDirtyLocked(now time.Time) {
+	p.dirtyPending = true
+	if p.saveAt.IsZero() {
+		p.saveAt = now.Add(saveDebounce)
+	}
+}
+
+// flushLocked writes the store when a debounced save is due.
+func (p *SendAtPlugin) flushLocked(now time.Time) {
+	if !p.dirtyPending {
+		return
+	}
+	if now.Before(p.saveAt) {
+		return
+	}
+	if err := p.saveLocked(); err != nil && p.logger != nil {
+		p.logger.Warn("sendat: save failed", "error", err)
+	}
+	p.dirtyPending, p.saveAt = false, time.Time{}
+}
+
+// Stop halts the scheduler, waits for it to exit and flushes any pending
+// debounced accounting write so nothing is lost on shutdown.
 func (p *SendAtPlugin) Stop(ctx context.Context) error {
 	p.mu.Lock()
 	cancel, done := p.cancel, p.done
@@ -181,6 +224,14 @@ func (p *SendAtPlugin) Stop(ctx context.Context) error {
 	case <-done:
 	case <-ctx.Done():
 	}
+	p.mu.Lock()
+	if p.dirtyPending {
+		if err := p.saveLocked(); err != nil && p.logger != nil {
+			p.logger.Warn("sendat: save failed", "error", err)
+		}
+		p.dirtyPending, p.saveAt = false, time.Time{}
+	}
+	p.mu.Unlock()
 	return nil
 }
 
@@ -216,7 +267,21 @@ func (p *SendAtPlugin) loop(ctx context.Context, done chan struct{}) {
 		if ctx.Err() != nil {
 			return
 		}
-		d := p.sleepFor(time.Now())
+		now := time.Now()
+		p.mu.Lock()
+		p.flushLocked(now)
+		nextSave := time.Duration(0)
+		if p.dirtyPending {
+			nextSave = p.saveAt.Sub(now)
+		}
+		p.mu.Unlock()
+		d := p.sleepFor(now)
+		if nextSave > 0 && nextSave < d {
+			d = nextSave
+		}
+		if d < 0 {
+			d = 0
+		}
 		if !timer.Stop() {
 			select {
 			case <-timer.C:
@@ -269,11 +334,41 @@ func (p *SendAtPlugin) runDue(ctx context.Context) {
 			continue
 		}
 		err := sendTask(ctx, api, resolver, t)
-		p.afterRun(t.ID, err)
+		var flood time.Duration
+		if err != nil {
+			if d, ok := tgerr.AsFloodWait(err); ok {
+				flood = d
+			}
+		}
+		p.afterRun(t.ID, err, flood)
+		// Catch-up runs after downtime: stagger the burst of overdue
+		// one-shot tasks instead of firing them in one instant.
+		if err == nil && t.Mode == modeOnce && now.Sub(time.Unix(t.At, 0)) > time.Minute {
+			select {
+			case <-time.After(catchUpGap):
+			case <-ctx.Done():
+				return
+			}
+		}
 	}
 }
 
-func (p *SendAtPlugin) afterRun(id int, sendErr error) {
+// retryDelay returns the backoff for a failed send: the FLOOD_WAIT value
+// when given (capped), else the default retry window, also capped.
+func retryDelay(flood time.Duration) time.Duration {
+	if flood > 0 {
+		if flood < sendRetry {
+			return sendRetry
+		}
+		if flood > maxBackoff {
+			return maxBackoff
+		}
+		return flood
+	}
+	return sendRetry
+}
+
+func (p *SendAtPlugin) afterRun(id int, sendErr error, flood time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	idx := p.indexLocked(id)
@@ -289,11 +384,26 @@ func (p *SendAtPlugin) afterRun(id int, sendErr error) {
 		if p.logger != nil {
 			p.logger.Warn("sendat: task send failed", "task", id, "error", sendErr)
 		}
-	} else {
-		t.LastError = ""
-		t.Count++
+		// Failed sends are retried after a backoff (FLOOD_WAIT aware).
+		// One-shot tasks are no longer dropped on the first failure —
+		// they used to vanish silently with their error message.
+		if t.Mode == modeOnce {
+			p.next[id] = now.Add(retryDelay(flood))
+			p.markDirtyLocked(now)
+			return
+		}
+		p.next[id] = nextRun(*t, now, p.loc).Add(retryDelay(flood) - time.Duration(t.PeriodSec)*time.Second)
+		if p.next[id].Before(now.Add(sendRetry)) {
+			p.next[id] = now.Add(sendRetry)
+		}
+		p.markDirtyLocked(now)
+		return
 	}
+	t.LastError = ""
+	t.Count++
 	finished := t.Mode == modeOnce
+	// Only successful sends decrement the remaining-run budget: "3 times"
+	// must mean three sent messages, not three attempts.
 	if !finished && t.TimeLimit > 0 {
 		t.TimeLimit--
 		finished = t.TimeLimit == 0
@@ -301,12 +411,15 @@ func (p *SendAtPlugin) afterRun(id int, sendErr error) {
 	if finished {
 		p.tasks = append(p.tasks[:idx], p.tasks[idx+1:]...)
 		delete(p.next, id)
-	} else if !t.Pause {
+		if err := p.saveLocked(); err != nil && p.logger != nil {
+			p.logger.Warn("sendat: save failed", "error", err)
+		}
+		return
+	}
+	if !t.Pause {
 		p.next[id] = nextRun(*t, now, p.loc)
 	}
-	if err := p.saveLocked(); err != nil && p.logger != nil {
-		p.logger.Warn("sendat: save failed", "error", err)
-	}
+	p.markDirtyLocked(now)
 }
 
 func sendTask(ctx context.Context, api *tg.Client, resolver plugin.PeerResolver, t Task) error {
@@ -614,10 +727,25 @@ func (p *SendAtPlugin) cmdList(ctx *plugin.CommandContext, all bool) error {
 		b.WriteString(tl("消息", "Message") + "  " + plugin.Code(truncate(t.Msg, 50)) + "\n")
 	}
 	out := strings.TrimRight(b.String(), "\n")
-	if len([]rune(out)) > 3900 {
-		out = string([]rune(out)[:3900]) + "\n…"
-	}
+	out = clipLinesRunes(out, 3900)
 	return ctx.Edit(out)
+}
+
+// clipLinesRunes truncates s to at most n runes at a line boundary, so no
+// Markdown span is cut in half (same policy as the other plugins).
+func clipLinesRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	cut := n
+	for cut > 0 && r[cut-1] != '\n' {
+		cut--
+	}
+	if cut == 0 {
+		cut = n
+	}
+	return strings.TrimRight(string(r[:cut]), "\n") + "\n…"
 }
 
 func (p *SendAtPlugin) cmdChange(ctx *plugin.CommandContext, args []string, op string) error {

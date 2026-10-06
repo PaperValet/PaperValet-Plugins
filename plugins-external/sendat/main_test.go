@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -181,8 +184,8 @@ func TestPersistenceAndLifecycle(t *testing.T) {
 		t.Error("task 4 dropped without api")
 	}
 	// simulate successful runs
-	q.afterRun(4, nil)
-	q.afterRun(1, nil)
+	q.afterRun(4, nil, 0)
+	q.afterRun(1, nil, 0)
 	q.mu.Lock()
 	if q.indexLocked(4) >= 0 {
 		t.Error("one-shot not removed after run")
@@ -210,13 +213,150 @@ func TestTimeLimitFinishes(t *testing.T) {
 	p.dir = t.TempDir()
 	p.tasks = []*Task{{ID: 1, Msg: "x", Mode: modeInterval, PeriodSec: 1, Anchor: time.Now().Unix(), TimeLimit: 2}}
 	p.next[1] = time.Now()
-	p.afterRun(1, nil)
+	p.afterRun(1, nil, 0)
 	if len(p.tasks) != 1 || p.tasks[0].TimeLimit != 1 {
 		t.Fatal("first run")
 	}
-	p.afterRun(1, nil)
+	p.afterRun(1, nil, 0)
 	if len(p.tasks) != 0 {
 		t.Fatal("task should be removed after limit")
+	}
+}
+
+func TestTimeLimitNotSpentOnFailure(t *testing.T) {
+	p := New()
+	p.dir = t.TempDir()
+	p.tasks = []*Task{{ID: 1, Msg: "x", Mode: modeInterval, PeriodSec: 60, Anchor: time.Now().Unix(), TimeLimit: 3}}
+	p.next[1] = time.Now()
+	// Two FLOOD_WAIT failures must not eat the "3 times" budget…
+	p.afterRun(1, errors.New("rpc error: FLOOD_WAIT_30"), 30*time.Second)
+	p.afterRun(1, errors.New("rpc error: FLOOD_WAIT_30"), 30*time.Second)
+	if p.tasks[0].TimeLimit != 3 || p.tasks[0].Count != 0 {
+		t.Fatalf("failures changed budget: limit=%d count=%d", p.tasks[0].TimeLimit, p.tasks[0].Count)
+	}
+	// …but the task stays scheduled for a retry, not dropped.
+	if _, ok := p.next[1]; !ok {
+		t.Fatal("failed task lost its retry slot")
+	}
+	// One success decrements once.
+	p.afterRun(1, nil, 0)
+	if p.tasks[0].TimeLimit != 2 || p.tasks[0].Count != 1 {
+		t.Fatalf("success accounting: limit=%d count=%d", p.tasks[0].TimeLimit, p.tasks[0].Count)
+	}
+}
+
+func TestOnceTaskRetriesInsteadOfVanishing(t *testing.T) {
+	p := New()
+	p.dir = t.TempDir()
+	at := time.Now().Add(-time.Minute)
+	p.tasks = []*Task{{ID: 2, Msg: "once", Mode: modeOnce, At: at.Unix(), TimeLimit: 1}}
+	p.next[2] = at
+	p.afterRun(2, errors.New("rpc error: TIME"), 0)
+	if len(p.tasks) != 1 {
+		t.Fatal("failed one-shot vanished")
+	}
+	if p.tasks[0].LastError == "" {
+		t.Fatal("error not recorded")
+	}
+	got, ok := p.next[2]
+	if !ok {
+		t.Fatal("one-shot lost its retry slot")
+	}
+	if until := time.Until(got); until <= 0 || until > sendRetry+time.Second {
+		t.Fatalf("retry window wrong: %v", until)
+	}
+}
+
+func TestRetryDelay(t *testing.T) {
+	cases := []struct {
+		flood time.Duration
+		want  time.Duration
+	}{
+		{0, sendRetry},
+		{5 * time.Second, sendRetry},
+		{2 * time.Minute, 2 * time.Minute},
+		{time.Hour, maxBackoff},
+	}
+	for _, c := range cases {
+		if got := retryDelay(c.flood); got != c.want {
+			t.Errorf("retryDelay(%v) = %v, want %v", c.flood, got, c.want)
+		}
+	}
+}
+
+func TestClipLinesRunes(t *testing.T) {
+	// Short text unchanged.
+	s := "**bold** `code`\n> quote"
+	if got := clipLinesRunes(s, 100); got != s {
+		t.Fatalf("short: %q", got)
+	}
+	// Cut lands on a line boundary; no Markdown span is split.
+	long := "**aaaaaaaaaaaaaaaa**\nbbbbbbbbbbbbbb\ncccccccccccccc"
+	got := clipLinesRunes(long, 30)
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("no ellipsis: %q", got)
+	}
+	if strings.Contains(got, "**a") && !strings.Contains(got, "**") {
+		t.Fatalf("markdown cut mid-span: %q", got)
+	}
+	lines := strings.Split(strings.TrimSuffix(got, "…"), "\n")
+	for _, l := range lines {
+		stars := strings.Count(l, "**")
+		if stars%2 != 0 {
+			t.Fatalf("odd ** count on line %q", l)
+		}
+	}
+}
+
+func TestDebouncedAccountingSave(t *testing.T) {
+	p := New()
+	p.dir = t.TempDir()
+	p.tasks = []*Task{{ID: 1, Msg: "x", Mode: modeInterval, PeriodSec: 60, Anchor: time.Now().Unix(), TimeLimit: -1}}
+	p.next[1] = time.Now()
+
+	p.afterRun(1, nil, 0) // accounting change, debounced
+	p.mu.Lock()
+	dirty, saveAt := p.dirtyPending, p.saveAt
+	p.mu.Unlock()
+	if !dirty || saveAt.IsZero() {
+		t.Fatal("accounting change not marked dirty")
+	}
+	if until := time.Until(saveAt); until <= 0 || until > saveDebounce+time.Second {
+		t.Fatalf("debounce window wrong: %v", until)
+	}
+
+	// Not due yet: no write.
+	p.mu.Lock()
+	p.flushLocked(time.Now())
+	stillDirty := p.dirtyPending
+	p.mu.Unlock()
+	if !stillDirty {
+		t.Fatal("flushed before the debounce window elapsed")
+	}
+
+	// Due: the write lands and the flag clears.
+	p.mu.Lock()
+	p.flushLocked(time.Now().Add(2 * saveDebounce))
+	gone := p.dirtyPending
+	p.mu.Unlock()
+	if gone {
+		t.Fatal("dirty flag not cleared after flush")
+	}
+	if _, err := os.Stat(filepath.Join(p.dir, tasksFile)); err != nil {
+		t.Fatalf("store not written: %v", err)
+	}
+
+	// Stop flushes any pending accounting write.
+	p.afterRun(1, nil, 0)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = p.Start(context.Background())
+	_ = p.Stop(ctx)
+	p.mu.Lock()
+	dirty = p.dirtyPending
+	p.mu.Unlock()
+	if dirty {
+		t.Fatal("Stop did not flush the pending accounting write")
 	}
 }
 
