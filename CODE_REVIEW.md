@@ -454,3 +454,20 @@ SDK 依据：`/root/PaperValet/pkg/plugin/sdk.go`、`markdown.go`（Bold/Link �
 
 ---
 落实状态跟踪：修完一条把行首 `- [ ]` 改 `- [x]`（后续把各条目改造成 checkbox）。本审查未改动任何插件代码。
+
+---
+
+## 落实结果（2026-10-06 修复批次）
+
+6 个修复域并行处理，**51 个 fix commit 全部过完整门禁（gofmt/vet/test/build/真实加载检查）后提交**，未推送时点为本节写入前。
+
+处置统计（185 条发现）：**fixed 165 · rejected 9（审查误报，验证后证伪）· deferred 13（需产品决策，逐条附理由）**
+
+- rejected 示例：bs sequence「首个失败也 break」实为审查误读（default 分支 continue，失败继续、成功即停，已补回归测试锁死）；bizhi `%2B` 编码问题实测证伪；music 「commands.go 无锁写」代码库无此文件
+- deferred 示例：trace premium 过期 custom emoji 自动剔除（改数据语义待定）、sticker DefaultPack 迁移、clean 保留统计策略等，明细见各域 status 文件
+- P0 全部修复：luxiaoxunbs 锁不平衡（abd8e46）、wordcloud TTC 越界（de485f7）、shift wlCache 无锁（1e59ff3 同批）、pmcaptcha self 目标（a63f6d6）、sendat DataDir（4e79b76）、checkin 并发窗口（91a4bf0）、teletype WaitGroup 代次计数
+- 论坛话题 ReplyToID 误判按 save 的 replyTarget 判定统一修复（trace/his/music/speedtest/crazy4 等）
+- 共性修复：Gemini key 改 x-goog-api-key 头（ai/xmsl）、第三方 API 命令补 OwnerOnly/RateLimit（ai/premium/ip/gt/duckduckgo/cosplay/bizhi/diss）、消息编辑类跳过媒体 caption 与带实体消息（textmode/pangu）、FLOOD_WAIT 分级重试上限
+
+逐插件明细：/root/.cache/pvreview/status-{media,scheduler,admin,http,info,misc}.md（每条带 commit、文件:行、验证方式）
+
