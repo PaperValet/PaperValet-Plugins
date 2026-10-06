@@ -24,6 +24,7 @@ import (
 const (
 	convTimeout = 2 * time.Minute
 	maxSticker  = 512 << 10 // 512 KB sticker limit
+	maxInput    = 20 << 20  // refuse to convert inputs over 20 MB
 )
 
 // settings snapshot for conversions, read from the panel with fallbacks.
@@ -333,15 +334,45 @@ func largestPhotoSize(sizes []tg.PhotoSizeClass) (typ string, w, h, size int) {
 }
 
 // downloadTo downloads message media into path (gotd downloader, rev-style).
+// Inputs over maxInput are refused before any byte hits the disk.
 func downloadTo(ctx *plugin.CommandContext, media tg.MessageMediaClass, path string) error {
 	loc, ok := mediaLocation(media)
 	if !ok {
 		return errors.New("unsupported media type")
 	}
+	if size := mediaSizeOf(media); size > maxInput {
+		return fmt.Errorf(ctx.Tlocal(
+			"文件过大（%d MB），上限 %d MB",
+			"file too large (%d MB), limit %d MB"), size>>20, maxInput>>20)
+	}
 	dctx, cancel := context.WithTimeout(ctx.Context(), convTimeout)
 	defer cancel()
 	_, err := downloader.NewDownloader().Download(ctx.API, loc).ToPath(dctx, path)
 	return err
+}
+
+// mediaSizeOf returns the declared size of photos/documents (0 when unknown).
+func mediaSizeOf(m tg.MessageMediaClass) int64 {
+	switch v := m.(type) {
+	case *tg.MessageMediaPhoto:
+		if photo, ok := v.Photo.(*tg.Photo); ok {
+			for _, s := range photo.Sizes {
+				switch ps := s.(type) {
+				case *tg.PhotoSize:
+					return int64(ps.Size)
+				case *tg.PhotoSizeProgressive:
+					if n := len(ps.Sizes); n > 0 {
+						return int64(ps.Sizes[n-1])
+					}
+				}
+			}
+		}
+	case *tg.MessageMediaDocument:
+		if d, ok := v.Document.(*tg.Document); ok {
+			return d.Size
+		}
+	}
+	return 0
 }
 
 // sendSticker uploads a WebP file with a sticker attribute and sends it,

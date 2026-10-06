@@ -19,10 +19,13 @@ import (
 )
 
 const (
-	tmpDirRoot = "data/sticker/tmp"
 	maxPackCap = 120 // Telegram limit per pack (source uses 120)
 	maxPackTry = 50  // auto-named packs to try
 )
+
+// tmpDirRoot is derived from the plugin DataDir in Init; the fallback keeps
+// the old relative path when no host is available (tests).
+var tmpDirRoot = "data/sticker/tmp"
 
 // baseEmojis backs up stickers that carry no alt emoji (source BASE_EMOJIS).
 var baseEmojis = []string{"😀", "😁", "😂", "🤣", "😊", "😇", "🙂", "😉", "😋", "😎", "😍", "😘", "😜", "🤗", "🤔", "😴", "😌", "😅", "😆", "😄"}
@@ -64,7 +67,8 @@ func (p *StickerPlugin) Init(_ context.Context, mgr plugin.Manager) error {
 	if p.host != nil {
 		if dir, err := p.host.DataDir("sticker"); err == nil && dir != "" {
 			p.cfgPath = filepath.Join(dir, "config.json")
-			_ = os.MkdirAll(dir, 0o755)
+			tmpDirRoot = filepath.Join(dir, "tmp")
+			_ = os.MkdirAll(tmpDirRoot, 0o755)
 		}
 	}
 	p.mu.Lock()

@@ -17,7 +17,10 @@ import (
 	"github.com/TiaraBasori/PaperValet/pkg/plugin"
 )
 
-const botReplyWait = 1500 * time.Millisecond
+const (
+	botReplyWait    = 1500 * time.Millisecond
+	botReplyMaxWait = 15 * time.Second
+)
 
 // handleFavorite implements "sticker" and "sticker to <pack>" on a replied
 // sticker message (dispatch has verified the reply).
@@ -71,7 +74,7 @@ func (p *StickerPlugin) handleFavorite(ctx *plugin.CommandContext, s sub) error 
 	}
 
 	if err := ctx.Edit("✅ " + ctx.Tlocal("收藏成功", "Favorited") + "\n\n" +
-		plugin.Link(plugin.Escape(packName), "https://t.me/addstickers/"+packName)); err != nil {
+		plugin.Link(packName, "https://t.me/addstickers/"+packName)); err != nil {
 		return err
 	}
 	sleepCtx(ctx.Context(), 5*time.Second) // the source deletes the success card after 5s
@@ -115,6 +118,7 @@ func (p *StickerPlugin) findOrCreatePack(ctx *plugin.CommandContext, packName, u
 		return packName, true, nil
 	}
 	suffix := kindSuffix(kind)
+	full := 0
 	for i := 1; i <= maxPackTry; i++ {
 		name := fmt.Sprintf("%s%s_%d", username, suffix, i)
 		set, exists, err := lookupSet(ctx, name)
@@ -127,8 +131,14 @@ func (p *StickerPlugin) findOrCreatePack(ctx *plugin.CommandContext, packName, u
 		if set != nil && set.Set.Count < maxPackCap {
 			return name, false, nil
 		}
+		// full packs run in sequences; after 8 in a row the rest are
+		// almost surely full too, and each lookup risks a FLOOD_WAIT.
+		full++
+		if full >= 8 {
+			break
+		}
 	}
-	return "", false, errors.New("no free auto pack found (tried 50)")
+	return "", false, errors.New("no free auto pack found (recent packs all full)")
 }
 
 // createStickerSet creates a pack with the sticker as its first item.
@@ -185,16 +195,24 @@ func (p *StickerPlugin) addToStickerSet(ctx *plugin.CommandContext, stickerMsg *
 		_ = sendMessage(ctx, bot, "/cancel")
 		return cause
 	}
-	// Not the owner → the bot cannot help.
+	// Not the owner → the bot cannot help. Every step waits for a bot
+	// message with an ID strictly newer than the previous one, so a slow
+	// bot is never misread from stale history.
+	_, base, err := newestBotMsg(ctx, bot)
+	if err != nil {
+		return fail(err)
+	}
 	if err := sendMessage(ctx, bot, "/addsticker"); err != nil {
 		return err
 	}
-	sleepCtx(c, botReplyWait)
+	_, promptID, err := waitBotReply(ctx, bot, base, botReplyMaxWait)
+	if err != nil {
+		return fail(err)
+	}
 	if err := sendMessage(ctx, bot, packName); err != nil {
 		return fail(err)
 	}
-	sleepCtx(c, botReplyWait)
-	text, err := latestBotText(ctx, bot)
+	text, afterPackID, err := waitBotReply(ctx, bot, promptID, botReplyMaxWait)
 	if err != nil {
 		return fail(err)
 	}
@@ -203,7 +221,10 @@ func (p *StickerPlugin) addToStickerSet(ctx *plugin.CommandContext, stickerMsg *
 			fmt.Sprintf("贴纸包 %s 无效或您不是该包的所有者", packName),
 			fmt.Sprintf("Pack %s is invalid or you are not its owner", packName))))
 	}
-	// Forward the sticker message as the sticker to add.
+	// Forward the sticker message as the sticker to add. The reply must
+	// have an id NEWER than the bot's last message or we read stale
+	// history and misreport a slow bot as an error.
+	beforeFwd := afterPackID
 	peer, err := ctx.ResolvePeer()
 	if err != nil {
 		return fail(err)
@@ -216,8 +237,7 @@ func (p *StickerPlugin) addToStickerSet(ctx *plugin.CommandContext, stickerMsg *
 	}); err != nil {
 		return fail(err)
 	}
-	sleepCtx(c, 2500*time.Millisecond)
-	text, err = latestBotText(ctx, bot)
+	text, _, err = waitBotReply(ctx, bot, beforeFwd, botReplyMaxWait)
 	if err != nil {
 		return fail(err)
 	}
@@ -241,28 +261,49 @@ func (p *StickerPlugin) addToStickerSet(ctx *plugin.CommandContext, stickerMsg *
 	return nil
 }
 
-// latestBotText reads the bot's most recent incoming message in the private
-// chat with the bot (our own outgoing messages are skipped).
-func latestBotText(ctx *plugin.CommandContext, bot tg.InputPeerClass) (string, error) {
+// waitBotReply polls the private chat until a non-outgoing message with an
+// id strictly greater than afterID arrives; returns its text and id. After
+// maxWait it returns the newest message it saw (id 0 when none appeared),
+// so the caller can still classify stale text.
+func waitBotReply(ctx *plugin.CommandContext, bot tg.InputPeerClass, afterID int, maxWait time.Duration) (string, int, error) {
+	deadline := time.Now().Add(maxWait)
+	for {
+		text, id, err := newestBotMsg(ctx, bot)
+		if err != nil {
+			return "", 0, err
+		}
+		if id > afterID {
+			return text, id, nil
+		}
+		if !time.Now().Before(deadline) || ctx.Context().Err() != nil {
+			return text, 0, nil
+		}
+		sleepCtx(ctx.Context(), botReplyWait)
+	}
+}
+
+// newestBotMsg returns the bot's most recent incoming message (own outgoing
+// messages are skipped) with its id, or id 0 when the chat has none.
+func newestBotMsg(ctx *plugin.CommandContext, bot tg.InputPeerClass) (string, int, error) {
 	hist, err := ctx.API.MessagesGetHistory(ctx.Context(), &tg.MessagesGetHistoryRequest{
 		Peer:  bot,
 		Limit: 5,
 	})
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	mod, ok := hist.AsModified()
 	if !ok {
-		return "", nil
+		return "", 0, nil
 	}
 	for _, m := range mod.GetMessages() {
 		msg, ok := m.(*tg.Message)
 		if !ok || msg.Out {
 			continue
 		}
-		return msg.Message, nil
+		return msg.Message, msg.ID, nil
 	}
-	return "", nil
+	return "", 0, nil
 }
 
 func sleepCtx(c context.Context, d time.Duration) {
@@ -328,7 +369,7 @@ func (p *StickerPlugin) handleStatus(ctx *plugin.CommandContext) error {
 	var b strings.Builder
 	b.WriteString("🧩 **" + ctx.Tlocal("贴纸收藏设置", "Sticker favorite settings") + "**\n\n")
 	if pack != "" {
-		b.WriteString(ctx.Tlocal("当前默认贴纸包", "Current default pack") + ": " + plugin.Link(plugin.Escape(pack), "https://t.me/addstickers/"+pack) + "\n")
+		b.WriteString(ctx.Tlocal("当前默认贴纸包", "Current default pack") + ": " + plugin.Link(pack, "https://t.me/addstickers/"+pack) + "\n")
 	} else if me, err := meUser(ctx); err == nil {
 		if u := usernameOf(me); u != "" {
 			b.WriteString(ctx.Tlocal("未设置默认贴纸包，将自动使用", "No default pack set; auto packs") + " " + plugin.Code(u+"_...") + "\n")
