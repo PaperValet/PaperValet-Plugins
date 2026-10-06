@@ -166,6 +166,47 @@ func TestExpireClaims(t *testing.T) {
 	}
 }
 
+// An expired pending prize must return its stock to the warehouse so the
+// prize kind is not silently lost; unknown prize names restock nothing.
+func TestExpireClaimsRestocksWarehouse(t *testing.T) {
+	p := newTestPlugin(t.TempDir())
+	now := time.Now()
+	p.createWarehouseLocked("vip")
+	p.addPrizeLocked("vip", "月卡", 0) // fully consumed at draw time
+	l := &lottery{Warehouse: "vip", Winners: []winner{
+		{UserID: 1, Prize: "月卡", Status: "pending", ExpiresAt: now.Add(-time.Hour).Unix()},
+		{UserID: 2, Prize: "恭喜中奖！", Status: "pending", ExpiresAt: now.Add(-time.Hour).Unix()},
+	}}
+	p.store.data.Lotteries = append(p.store.data.Lotteries, l)
+	if n := p.expireClaimsLocked(now); n != 2 {
+		t.Fatalf("expired = %d, want 2", n)
+	}
+	items := p.prizesInStockLocked("vip")
+	if len(items) != 1 || items[0].Stock != 1 {
+		t.Fatalf("after expiry warehouse = %+v, want 月卡 x1", items)
+	}
+}
+
+// randIntn must stay uniform over its full domain: run it through many
+// buckets and check the spread. Catches a broken rejection limit.
+func TestRandIntnUniform(t *testing.T) {
+	const buckets = 13
+	const rounds = 13000
+	hits := make([]int, buckets)
+	for i := 0; i < rounds; i++ {
+		hits[randIntn(buckets)]++
+	}
+	want := rounds / buckets
+	for b, n := range hits {
+		if n < want-want/5 || n > want+want/5 { // ±20%
+			t.Fatalf("bucket %d = %d, want ~%d — RNG looks biased", b, n, want)
+		}
+	}
+	if randIntn(1) != 0 || randIntn(0) != 0 {
+		t.Fatal("n<=1 must return 0")
+	}
+}
+
 func TestParseAt(t *testing.T) {
 	now := time.Date(2026, 10, 5, 10, 0, 0, 0, time.Local)
 	at, err := parseAt("21:00", now)

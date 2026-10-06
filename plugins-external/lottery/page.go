@@ -18,16 +18,27 @@ func (p *LotteryPlugin) page(c *plugin.BotContext) (*plugin.View, error) {
 			case "draw":
 				p.drawAsync(id, "panel")
 			case "del":
+				var chatID, msgID int64
 				p.mu.Lock()
 				out := p.store.data.Lotteries[:0]
 				for _, x := range p.store.data.Lotteries {
 					if x.ID != id {
 						out = append(out, x)
+					} else {
+						chatID, msgID = x.ChatID, int64(x.MessageID)
 					}
 				}
 				p.store.data.Lotteries = out
-				p.saveLocked()
+				saveErr := p.saveLocked()
 				p.mu.Unlock()
+				// Clean the pinned announcement too, like lottery delete.
+				if msgID > 0 {
+					go p.deleteMessages(p.lifetime(), chatID, int(msgID))
+				}
+				if saveErr != nil {
+					c.Alert(tl("删除失败: ", "Delete failed: ") + saveErr.Error())
+					break
+				}
 				c.Toast(tl("已删除", "Deleted"))
 			}
 		}

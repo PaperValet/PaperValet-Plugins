@@ -102,7 +102,19 @@ func (p *LotteryPlugin) notifyDuplicate(live context.Context, ev *plugin.Message
 func (p *LotteryPlugin) doJoin(live context.Context, ev *plugin.MessageEvent, joinee participant, title, keyword string, maxUsers int, chatID, langKey int64) {
 	user, err := p.fetchUser(live, chatID, ev.Message, joinee.UserID)
 	if err != nil && user == nil {
-		p.log.Debug("lottery: cannot resolve participant", "user", joinee.UserID, "error", err)
+		// Could not tell whether the sender is a bot account. A retry
+		// after a short backoff keeps bot joins detectable without
+		// blocking the update path.
+		select {
+		case <-live.Done():
+			return
+		case <-time.After(3 * time.Second):
+		}
+		user, err = p.fetchUser(live, chatID, ev.Message, joinee.UserID)
+		if err != nil && user == nil {
+			p.log.Debug("lottery: cannot resolve participant, skipping join", "user", joinee.UserID, "error", err)
+			return // unresolvable sender: do not record a blind join
+		}
 	}
 	if user != nil {
 		joinee.Username = user.Username
@@ -302,15 +314,19 @@ func (p *LotteryPlugin) performDraw(ctx context.Context, id int64, via string) e
 	msgID := l.MessageID
 	warehouse := l.Warehouse
 	winnerCnt := l.WinnerCnt
-	// Delete the announcement before announcing results (like the source).
+	// Close the join window up front: no new participant can slip in while
+	// the announcement delete runs outside the lock, so the winners below
+	// are drawn from exactly this snapshot.
+	l.Status = "drawing"
+	p.saveLocked()
 	p.mu.Unlock()
 	if msgID > 0 {
-		p.deleteMessages(ctx, chatID, msgID)
+		p.deleteMessages(ctx, chatID, msgID) // delete the announcement like the source
 	}
 
 	p.mu.Lock()
 	l = p.findLocked(id)
-	if l == nil || l.Status != "active" { // raced with another draw
+	if l == nil || l.Status != "drawing" { // raced with another draw
 		p.mu.Unlock()
 		return nil
 	}
@@ -350,13 +366,14 @@ func (p *LotteryPlugin) performDraw(ctx context.Context, id int64, via string) e
 	l.Status = "completed"
 	l.AutoDrawAt = 0
 	p.saveLocked()
+	lotteryID := l.ID
 	winners := append([]winner(nil), l.Winners...)
 	p.mu.Unlock()
 
 	// DM every winner their prize (auto-send mode, like the source).
 	sent := 0
 	for _, w := range winners {
-		if err := p.dmWinner(ctx, w, title, creator); err != nil {
+		if err := p.dmWinner(ctx, lotteryID, w, title, creator); err != nil {
 			p.log.Warn("lottery: winner DM failed", "user", w.UserID, "error", err)
 			continue
 		}
@@ -386,8 +403,10 @@ func (p *LotteryPlugin) performDraw(ctx context.Context, id int64, via string) e
 	return nil
 }
 
-// dmWinner sends the prize notification to the winner's private chat.
-func (p *LotteryPlugin) dmWinner(ctx context.Context, w winner, title string, creator int64) error {
+// dmWinner sends the prize notification to the winner's private chat and
+// marks it sent in lottery id's winner record (not whichever lottery first
+// holds this user).
+func (p *LotteryPlugin) dmWinner(ctx context.Context, lotteryID int64, w winner, title string, creator int64) error {
 	if p.host == nil || p.host.API() == nil {
 		return errors.New("no api client")
 	}
@@ -415,7 +434,7 @@ func (p *LotteryPlugin) dmWinner(ctx context.Context, w winner, title string, cr
 	}
 	// Mark sent.
 	p.mu.Lock()
-	if l := p.findLockedByWinner(w.UserID); l != nil {
+	if l := p.findLocked(lotteryID); l != nil {
 		for i := range l.Winners {
 			if l.Winners[i].UserID == w.UserID {
 				l.Winners[i].Status = "sent"
@@ -424,18 +443,6 @@ func (p *LotteryPlugin) dmWinner(ctx context.Context, w winner, title string, cr
 		p.saveLocked()
 	}
 	p.mu.Unlock()
-	return nil
-}
-
-// findLockedByWinner finds the lottery holding a winner (DM marking path).
-func (p *LotteryPlugin) findLockedByWinner(userID int64) *lottery {
-	for _, l := range p.store.data.Lotteries {
-		for _, w := range l.Winners {
-			if w.UserID == userID {
-				return l
-			}
-		}
-	}
 	return nil
 }
 

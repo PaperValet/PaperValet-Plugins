@@ -199,7 +199,10 @@ func (p *LotteryPlugin) cmdCreate(ctx *plugin.CommandContext) error {
 	}
 	p.mu.Unlock()
 	p.pinAnnouncement(p.lifetime(), chatID, msgID, notify)
-	return ctx.Delete()
+	if err := ctx.Delete(); err != nil {
+		p.log.Debug("lottery: delete command message failed", "error", err)
+	}
+	return nil
 }
 
 // warehouseList shows warehouses with stock (lottery create list).
@@ -272,7 +275,12 @@ func (p *LotteryPlugin) cmdDraw(ctx *plugin.CommandContext) error {
 		return ctx.Edit("❌ " + tl("开奖失败: ", "Draw failed: ") + plugin.Escape(err.Error()))
 	}
 	// The result card was posted to the chat; drop the command message.
-	return ctx.Delete()
+	// A failed delete (no delete rights in this chat) must not turn a
+	// successful draw into a reported error.
+	if err := ctx.Delete(); err != nil {
+		p.log.Debug("lottery: delete command message failed", "error", err)
+	}
+	return nil
 }
 
 // canDraw checks creator or group-admin rights.
@@ -420,6 +428,7 @@ func (p *LotteryPlugin) cmdWinners(ctx *plugin.CommandContext) error {
 }
 
 // cmdClaim marks a winner's prize delivered, by ID or @username.
+// Like draw/delete, only the creator or a group admin may mark deliveries.
 func (p *LotteryPlugin) cmdClaim(ctx *plugin.CommandContext) error {
 	tl := ctx.Tlocal
 	arg := ctx.GetArg(1)
@@ -427,7 +436,6 @@ func (p *LotteryPlugin) cmdClaim(ctx *plugin.CommandContext) error {
 		return ctx.Edit("❌ " + tl("用法: ", "Usage: ") + plugin.Code("lottery claim <ID/@用户名>"))
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	// Prefer the active lottery, else the chat's latest completed one.
 	l := p.activeLocked(ctx.Message.ChatID)
 	if l == nil {
@@ -441,6 +449,20 @@ func (p *LotteryPlugin) cmdClaim(ctx *plugin.CommandContext) error {
 		}
 		l = best
 	}
+	var id, creator int64
+	if l != nil {
+		id, creator = l.ID, l.CreatorID
+	}
+	p.mu.Unlock()
+	if l == nil {
+		return ctx.Edit("❌ " + tl("本群没有抽奖活动", "No lottery in this chat"))
+	}
+	if !p.canDraw(ctx, id, creator) {
+		return ctx.Edit("❌ " + tl("只有抽奖创建者或群管理员可以标记领奖", "Only the lottery creator or a group admin can mark prizes delivered"))
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	l = p.findLocked(id)
 	if l == nil {
 		return ctx.Edit("❌ " + tl("本群没有抽奖活动", "No lottery in this chat"))
 	}

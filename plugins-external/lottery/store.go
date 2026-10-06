@@ -212,7 +212,8 @@ func (p *LotteryPlugin) clearWarehouseLocked(name string) int {
 	return n
 }
 
-// expireClaimsLocked marks pending prizes past their deadline expired.
+// expireClaimsLocked marks pending prizes past their deadline expired and
+// returns their stock to the warehouse so the prize is not silently lost.
 func (p *LotteryPlugin) expireClaimsLocked(now time.Time) int {
 	n := 0
 	for _, l := range p.store.data.Lotteries {
@@ -221,6 +222,16 @@ func (p *LotteryPlugin) expireClaimsLocked(now time.Time) int {
 			if w.Status == "pending" && w.ExpiresAt > 0 && w.ExpiresAt < now.Unix() {
 				w.Status = "expired"
 				n++
+				// Return the prize kind to its warehouse if the kind
+				// still exists (best effort, in order).
+				if items, ok := p.store.data.Warehouses[l.Warehouse]; ok && w.Prize != "" {
+					for j := range items {
+						if items[j].Text == w.Prize {
+							items[j].Stock++
+							break
+						}
+					}
+				}
 			}
 		}
 	}

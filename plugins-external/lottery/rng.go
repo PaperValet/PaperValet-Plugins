@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"math"
 	mrand "math/rand"
 )
 
@@ -14,9 +15,10 @@ func randIntn(n int) int {
 	if n <= 1 {
 		return 0
 	}
-	// Rejection sampling keeps the distribution uniform.
-	max := uint64(1) << 63
-	limit := max - max%uint64(n)
+	// Rejection sampling keeps the distribution uniform. The domain is the
+	// full uint64 range with the incomplete tail block dropped, so on
+	// average one draw in 2^64/n is rejected (negligible).
+	limit := math.MaxUint64 - math.MaxUint64%uint64(n)
 	for {
 		v, err := cryptoUint64()
 		if err != nil {
