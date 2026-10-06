@@ -46,6 +46,20 @@ func TestExtractWhoisFromSSE(t *testing.T) {
 	}
 }
 
+// The SSE spec allows `data:` without the trailing space; a server-side
+// formatting tweak must not turn every query into "domain does not exist".
+func TestParseSSEResponseNoSpace(t *testing.T) {
+	raw := "data:{\"type\":\"check\",\"data\":{\"whois\":{\"whois\":\"Domain Name: X\"}}}\n" +
+		"data:	{\"type\":\"tld\",\"data\":{\"name\":\"com\"}}\n"
+	events := parseSSEResponse(raw)
+	if len(events) != 2 {
+		t.Fatalf("want 2 events, got %d", len(events))
+	}
+	if events[0].Type != "check" || events[1].Type != "tld" {
+		t.Fatalf("types %q %q", events[0].Type, events[1].Type)
+	}
+}
+
 // --- field extraction (regexes copied from the source) ---
 
 const sampleWhois = "   Domain Name: GOOGLE.COM\r\n" +
@@ -220,6 +234,37 @@ func TestStoreCacheExpiry(t *testing.T) {
 	}
 	if _, ok := s.d.Cache["google.com"]; ok {
 		t.Fatal("expired entry not deleted")
+	}
+}
+
+// Once the cache passes cachePruneSize, saving must drop the expired
+// entries so never-revisited domains do not pile up forever.
+func TestStorePruneCache(t *testing.T) {
+	s, _ := newTestStore(t)
+	old := nowFunc
+	defer func() { nowFunc = old }()
+	base := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	// Fill with stale entries below the prune threshold: nothing pruned.
+	nowFunc = func() time.Time { return base }
+	for i := 0; i < cachePruneSize-1; i++ {
+		if err := s.save(buildRecord(fmt.Sprintf("old%d.com", i), sampleWhois)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := s.pruneCacheLocked(); n != 0 {
+		t.Fatalf("pruned %d below threshold, want 0", n)
+	}
+	// Time passes; one more save crosses the threshold and drops the
+	// expired bulk while keeping the fresh entry.
+	nowFunc = func() time.Time { return base.Add(25 * time.Hour) }
+	if err := s.save(buildRecord("fresh.com", sampleWhois)); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.d.Cache["fresh.com"]; !ok {
+		t.Fatal("fresh entry pruned")
+	}
+	if n := len(s.d.Cache); n > 2 {
+		t.Fatalf("cache still holds %d entries after prune", n)
 	}
 }
 

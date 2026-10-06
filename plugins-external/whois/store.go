@@ -127,6 +127,24 @@ func (s *store) cached(domain string) (WhoisRecord, bool) {
 	return rec, true
 }
 
+// pruneCache drops expired entries. Called when the cache outgrew
+// cachePruneSize: without it, domains never queried again would pile up in
+// whois_data.json forever (each carrying up to 3k chars of raw data).
+const cachePruneSize = 500
+
+func (s *store) pruneCacheLocked() (removed int) {
+	if len(s.d.Cache) < cachePruneSize {
+		return 0
+	}
+	for k, rec := range s.d.Cache {
+		if s.expiredLocked(rec) {
+			delete(s.d.Cache, k)
+			removed++
+		}
+	}
+	return removed
+}
+
 // expiredLocked reports whether rec outlived cacheHours.
 func (s *store) expiredLocked(rec WhoisRecord) bool {
 	t, ok := parseQueryTime(rec.QueryTime)
@@ -141,11 +159,13 @@ func (s *store) expiredLocked(rec WhoisRecord) bool {
 }
 
 // save stores the record in cache and history, trimming history to
-// maxHistory entries (newest first, like the source's unshift).
+// maxHistory entries (newest first, like the source's unshift) and pruning
+// expired cache entries once the cache grows large.
 func (s *store) save(rec WhoisRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.d.Cache[lowerKey(rec.Domain)] = rec
+	s.pruneCacheLocked()
 	s.d.History = append([]WhoisRecord{rec}, s.d.History...)
 	max := s.d.Settings.MaxHistory
 	if max <= 0 {

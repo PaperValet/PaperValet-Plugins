@@ -73,16 +73,23 @@ type sseEvent struct {
 }
 
 // parseSSEResponse parses the SSE stream, skipping lines that are not
-// `data: `-prefixed JSON (the source logs and skips bad lines).
+// `data:`-prefixed JSON. The SSE spec allows `data:` with or without the
+// space, so both spellings are accepted (the source logs and skips bad
+// lines).
 func parseSSEResponse(raw string) []sseEvent {
 	var events []sseEvent
 	for _, line := range strings.Split(raw, "\n") {
 		t := strings.TrimSpace(line)
-		if !strings.HasPrefix(t, "data: ") {
+		payload, ok := strings.CutPrefix(t, "data:")
+		if !ok {
+			continue
+		}
+		payload = strings.TrimSpace(payload)
+		if payload == "" {
 			continue
 		}
 		var e sseEvent
-		if err := json.Unmarshal([]byte(t[len("data: "):]), &e); err != nil {
+		if err := json.Unmarshal([]byte(payload), &e); err != nil {
 			continue
 		}
 		events = append(events, e)
