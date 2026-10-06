@@ -127,17 +127,19 @@ func sentMessageID(res tg.UpdatesClass) int {
 		ups = v.Updates
 	}
 	for _, u := range ups {
-		var msg tg.MessageClass
 		switch m := u.(type) {
+		case *tg.UpdateMessageID:
+			if m.ID != 0 {
+				return m.ID
+			}
 		case *tg.UpdateNewMessage:
-			msg = m.Message
+			if msg, ok := m.Message.(*tg.Message); ok {
+				return msg.ID
+			}
 		case *tg.UpdateNewChannelMessage:
-			msg = m.Message
-		default:
-			continue
-		}
-		if m, ok := msg.(*tg.Message); ok {
-			return m.ID
+			if msg, ok := m.Message.(*tg.Message); ok {
+				return msg.ID
+			}
 		}
 	}
 	return 0

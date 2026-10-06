@@ -318,7 +318,9 @@ func (p *LuxiaoxunbsPlugin) loop(ctx context.Context, done chan struct{}) {
 func (p *LuxiaoxunbsPlugin) sendAll(ctx context.Context) error {
 	p.mu.Lock()
 	if !p.loaded || len(p.docs) == 0 {
-		// Lazy-load on first tick, like the source load-on-demand.
+		// Lazy-load on first tick, like the source load-on-demand. The lock
+		// is dropped for the network call and re-taken before the snapshot,
+		// so the whole function unlocks exactly once below.
 		api := p.api
 		p.mu.Unlock()
 		if api == nil {
@@ -330,13 +332,13 @@ func (p *LuxiaoxunbsPlugin) sendAll(ctx context.Context) error {
 		}
 		p.mu.Lock()
 		p.docs, p.setTitle, p.loaded = docs, title, true
-		p.mu.Unlock()
 	}
 	now := time.Now()
 	idx := hourIndex(now, len(p.docs))
 	doc := pickSticker(p.docs, idx)
+	var missing error
 	if doc == nil {
-		return fmt.Errorf("no sticker for hour %d", idx)
+		missing = fmt.Errorf("no sticker for hour %d", idx)
 	}
 	subs := make(map[string]int64, len(p.state.Subs))
 	for k, v := range p.state.Subs {
@@ -344,6 +346,9 @@ func (p *LuxiaoxunbsPlugin) sendAll(ctx context.Context) error {
 	}
 	api := p.api
 	p.mu.Unlock()
+	if missing != nil {
+		return missing
+	}
 	if api == nil {
 		return fmt.Errorf("no api client")
 	}
@@ -368,14 +373,34 @@ func (p *LuxiaoxunbsPlugin) sendAll(ctx context.Context) error {
 		lastID := p.state.Last[key]
 		p.mu.Unlock()
 
-		sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		newID, err := sendStickerToChat(sctx, api, peer, doc, lastID)
-		cancel()
-		if err != nil {
-			if d, ok := floodWait(err); ok {
-				p.warn("flood wait", fmt.Errorf("%s: retry in %v", key, d+time.Second))
-				continue
+		newID, err := func() (int, error) {
+			sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			id, e := sendStickerToChat(sctx, api, peer, doc, lastID)
+			if e == nil {
+				return id, nil
 			}
+			if d, ok := floodWait(e); ok {
+				// The hourly report must not be silently skipped for a whole
+				// hour on a short flood wait: sleep it off (bounded by the
+				// send budget) and retry this chat once.
+				p.warn("flood wait", fmt.Errorf("%s: retry in %v", key, d+time.Second))
+				wait := d + time.Second
+				if wait > 30*time.Second {
+					return 0, e
+				}
+				select {
+				case <-time.After(wait):
+				case <-ctx.Done():
+					return 0, e
+				}
+				rctx, rcancel := context.WithTimeout(ctx, 30*time.Second)
+				defer rcancel()
+				return sendStickerToChat(rctx, api, peer, doc, lastID)
+			}
+			return 0, e
+		}()
+		if err != nil {
 			p.warn("send failed", fmt.Errorf("%s: %w", key, err))
 			if fatalSendError(err.Error()) || tgerr.Is(err, "CHAT_WRITE_FORBIDDEN", "CHAT_NOT_FOUND", "USER_IS_BLOCKED", "PEER_ID_INVALID", "CHANNEL_PRIVATE", "CHAT_ID_INVALID") {
 				remove = append(remove, key)
@@ -437,9 +462,14 @@ func (p *LuxiaoxunbsPlugin) page(c *plugin.BotContext) (*plugin.View, error) {
 		p.mu.Lock()
 		delete(p.state.Subs, key)
 		delete(p.state.Last, key)
-		_ = save(filepath.Join(p.dir, stateFile), p.state)
+		err := save(filepath.Join(p.dir, stateFile), p.state)
 		p.mu.Unlock()
-		c.Toast(tl("已移除", "Removed"))
+		if err != nil {
+			p.warn("save after page remove", err)
+			c.Toast(tl("移除失败：保存状态出错", "Remove failed: could not save state"))
+		} else {
+			c.Toast(tl("已移除", "Removed"))
+		}
 	}
 	p.mu.Lock()
 	keys := make([]string, 0, len(p.state.Subs))

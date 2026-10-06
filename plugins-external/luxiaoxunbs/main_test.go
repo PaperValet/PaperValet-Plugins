@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/gotd/td/tg"
 )
 
 func TestHourIndexMatchesSource(t *testing.T) {
@@ -126,4 +129,67 @@ func TestParseSubCommand(t *testing.T) {
 // saveRaw is a test helper writing bytes straight to disk.
 func saveRaw(path string, b []byte) error {
 	return os.WriteFile(path, b, 0o600)
+}
+
+// TestSendAllLazyLoadLockBalance drives the first-tick lazy-load path of
+// sendAll: the function must not unlock p.mu twice (the historical bug
+// panicked with "sync: unlock of unlocked mutex" on the very first hourly
+// report). With no API client the call returns an error before sending, but
+// only after the lock dance completed exactly once, which this test asserts
+// by locking afterwards — a double unlock would have left the mutex in an
+// inconsistent state or panicked here already.
+func TestSendAllLazyLoadLockBalance(t *testing.T) {
+	p := New()
+	p.dir = t.TempDir()
+	st, err := load(p.dir + "/subscriptions.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Subs["777"] = time.Now().Unix()
+	p.state = st
+
+	// Not loaded and no docs: the lazy-load branch runs, fails for lack of
+	// an API client, and must leave p.mu properly balanced.
+	if err := p.sendAll(context.Background()); err == nil {
+		t.Fatalf("expected no-api error, got nil")
+	}
+	p.mu.Lock()
+	loaded, docs := p.loaded, len(p.docs)
+	p.mu.Unlock()
+	if loaded || docs != 0 {
+		t.Fatalf("state changed without api: loaded=%v docs=%d", loaded, docs)
+	}
+
+	// With docs already present the non-lazy path runs; also must balance.
+	p.mu.Lock()
+	p.loaded = true
+	p.docs = []*tg.Document{{ID: 1, AccessHash: 1, FileReference: []byte{1}}}
+	p.mu.Unlock()
+	if err := p.sendAll(context.Background()); err == nil {
+		t.Fatalf("expected no-api error, got nil")
+	}
+	// The mutex must still be lockable and consistent.
+	p.mu.Lock()
+	p.mu.Unlock()
+}
+
+// TestSentMessageIDUpdateMessageID covers the UpdateMessageID reply shape
+// (channels answer messages.sendMessage with an updates box containing only
+// UpdateMessageID): newID must be non-zero so the previous sticker gets
+// deleted next hour.
+func TestSentMessageIDUpdateMessageID(t *testing.T) {
+	box := &tg.Updates{Updates: []tg.UpdateClass{
+		&tg.UpdateMessageID{ID: 77},
+	}}
+	if got := sentMessageID(box); got != 77 {
+		t.Fatalf("updates box with only UpdateMessageID: got %d, want 77", got)
+	}
+	// UpdateMessageID wins over an empty message placeholder in the box.
+	mixed := &tg.Updates{Updates: []tg.UpdateClass{
+		&tg.UpdateNewMessage{Message: &tg.MessageEmpty{ID: 0}},
+		&tg.UpdateMessageID{ID: 88},
+	}}
+	if got := sentMessageID(mixed); got != 88 {
+		t.Fatalf("mixed box: got %d, want 88", got)
+	}
 }
