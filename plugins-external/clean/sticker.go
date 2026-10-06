@@ -12,6 +12,7 @@ import (
 
 const (
 	stickerPage      = 100
+	stickerDryPages  = 15 // consecutive empty pages before giving up
 	stickerDefault   = 2000
 	stickerMax       = 2000
 	stickerThrottle  = 1200 * time.Millisecond
@@ -55,6 +56,7 @@ func (p *CleanPlugin) clearStickers(j *job, max int) {
 
 	deleted, scanned, pages := 0, 0, 0
 	offsetID := 0
+	dryPages := 0 // consecutive pages without a single sticker
 	for deleted < max {
 		if err := j.Context().Err(); err != nil {
 			return
@@ -121,6 +123,16 @@ func (p *CleanPlugin) clearStickers(j *job, max int) {
 		pages++
 		offsetID = next
 		j.progress(stickerProgress(tl, deleted, max, scanned))
+		if len(ids) == 0 {
+			dryPages++
+			// A group poor in stickers would otherwise page through its
+			// whole history; a long dry streak means there are no more.
+			if dryPages >= stickerDryPages {
+				break
+			}
+		} else {
+			dryPages = 0
+		}
 		if len(msgs) < stickerPage {
 			break
 		}

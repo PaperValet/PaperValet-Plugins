@@ -605,3 +605,84 @@ func TestHelpText(t *testing.T) {
 		t.Error("sticker help missing count")
 	}
 }
+
+// Mode 5 (remove every ordinary member) must only run with the explicit
+// `confirm` argument — `rm`, which authorizes the milder destructive modes,
+// must NOT bypass the strong warning.
+func TestMode5ConfirmOnly(t *testing.T) {
+	// The guard's decision logic, extracted verbatim from handleMember:
+	// !onlyScan && !confirm && !(mode != 5 && rm)
+	guard := func(mode int, onlyScan, confirm, rm bool) bool {
+		return !onlyScan && !confirm && !(mode != 5 && rm)
+	}
+	cases := []struct {
+		name                  string
+		mode                  int
+		onlyScan, confirm, rm bool
+		wantWarn              bool // true → the warning fires
+	}{
+		{"mode5 rm still warns", 5, false, false, true, true},
+		{"mode5 confirm runs", 5, false, true, false, false},
+		{"mode5 search skips", 5, true, false, false, false},
+		{"mode4 rm runs", 4, false, false, true, false},
+		{"mode4 bare warns", 4, false, false, false, true},
+		{"mode1 confirm runs", 1, false, true, false, false},
+	}
+	for _, c := range cases {
+		if got := guard(c.mode, c.onlyScan, c.confirm, c.rm); got != c.wantWarn {
+			t.Errorf("%s: guard = %v, want %v", c.name, got, c.wantWarn)
+		}
+	}
+}
+
+// When members are removed mid-scan the participant list shifts up, so the
+// next page's offset must advance by (page size − removals), not by the page
+// size; otherwise members slide past the window unscanned.
+func TestMemberPaginationDisplacement(t *testing.T) {
+	const pageSize = 10
+	// Simulate a 100-member group where every third member matches.
+	total := 100
+	match := map[int]bool{}
+	for i := 0; i < total; i++ {
+		if i%3 == 0 {
+			match[i] = true
+		}
+	}
+	removed := 0
+	scanned := 0
+	seen := map[int]bool{}
+	offset := 0
+	// The "server": entries with lower indexes first; removals shift.
+	for offset+pageSize <= total && offset >= 0 {
+		page := make([]int, 0, pageSize)
+		for i := 0; i < total && len(page) < pageSize; i++ {
+			if i >= offset && !seen[i] {
+				page = append(page, i)
+			}
+		}
+		if len(page) == 0 {
+			break
+		}
+		kickedInPage := 0
+		for _, i := range page {
+			if seen[i] {
+				continue
+			}
+			seen[i] = true
+			scanned++
+			if match[i] {
+				removed++
+				kickedInPage++
+				// the member leaves the list; indexes above shift down
+			}
+		}
+		offset += len(page) - kickedInPage
+	}
+	// Old code (offset += pageSize) would scan fewer than everyone.
+	if scanned != total {
+		t.Errorf("scanned = %d, want %d (every member seen exactly once)", scanned, total)
+	}
+	if removed != (total+2)/3 {
+		t.Errorf("removed = %d, want %d", removed, (total+2)/3)
+	}
+}

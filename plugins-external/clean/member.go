@@ -173,10 +173,11 @@ func (p *CleanPlugin) handleMember(ctx *plugin.CommandContext, args []string) er
 		chatTitle = tl("当前群组", "this group")
 	}
 
-	if !plan.onlyScan && !ctx.HasArg("confirm") && !ctx.HasArg("rm") {
-		// Destructive modes: preview first, then confirm.
+	if !plan.onlyScan && !ctx.HasArg("confirm") && !(plan.mode != 5 && ctx.HasArg("rm")) {
+		// Destructive modes: preview first, then confirm. Mode 5 (remove
+		// every ordinary member) only ever accepts the explicit confirm.
 		if plan.mode == 5 {
-			return p.deny(ctx, "⚠️ "+tl("模式 5 会移出所有普通成员！加 confirm 执行：", "Mode 5 removes every ordinary member! Add confirm to run: ")+plugin.Code("clean member 5 confirm"))
+			return p.deny(ctx, "⚠️ "+tl("模式 5 会移出所有普通成员！只能加 confirm 执行：", "Mode 5 removes every ordinary member! Only confirm runs it: ")+plugin.Code("clean member 5 confirm"))
 		}
 		return p.deny(ctx, "⚠️ "+tl("将移出成员：", "This removes members: ")+plugin.Bold(plan.label(tl))+
 			"\n"+tl("加 confirm 执行，或先加 search 预览", "Add confirm to run, or search to preview first"))
@@ -234,6 +235,8 @@ func (p *CleanPlugin) cleanMembers(j *job, target *tg.InputPeerChannel, title st
 	var res memberResult
 	stop := false
 	offset := 0
+	removedBefore := 0
+	seen := map[int64]bool{} // dedupes across windows that do not advance
 	for !stop && offset <= memberScanMax {
 		if err := j.Context().Err(); err != nil {
 			return
@@ -272,6 +275,10 @@ func (p *CleanPlugin) cleanMembers(j *job, target *tg.InputPeerChannel, title st
 			if uid == 0 {
 				continue
 			}
+			if seen[uid] {
+				continue // slid back into this window after a removal
+			}
+			seen[uid] = true
 			res.Scanned++
 			if admins[uid] || uid == j.SelfID {
 				continue
@@ -322,7 +329,11 @@ func (p *CleanPlugin) cleanMembers(j *job, target *tg.InputPeerChannel, title st
 		if len(cp.Participants) < memberPage {
 			break
 		}
-		offset += memberPage
+		// Each removal shifts the remaining list up by one, so the offset
+		// advances only by the participants that are still in place.
+		removedNow := res.Removed + len(res.Failed) - removedBefore
+		removedBefore = res.Removed + len(res.Failed)
+		offset += len(cp.Participants) - removedNow
 		sleepCtx(j.Context(), 100*time.Millisecond)
 	}
 

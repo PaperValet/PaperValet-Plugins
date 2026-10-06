@@ -73,6 +73,7 @@ func (p *CleanPlugin) cleanDeletedPM(j *job, rm bool) {
 
 	byID := map[int64]deletedDialog{}
 	users := map[int64]*tg.User{}
+	truncated := false // hit the per-folder page guard: the scan stopped early
 	for _, folder := range []int{0, 1} {
 		offsetDate, offsetID := 0, 0
 		var offsetPeer tg.InputPeerClass = &tg.InputPeerEmpty{}
@@ -139,6 +140,9 @@ func (p *CleanPlugin) cleanDeletedPM(j *job, rm bool) {
 					offsetDate = m.Date
 				}
 			}
+			if page == dialogsGuard-1 {
+				truncated = true
+			}
 		}
 	}
 
@@ -177,6 +181,10 @@ func (p *CleanPlugin) cleanDeletedPM(j *job, rm bool) {
 		s = "✅ **" + tl("清理完成", "Cleanup finished") + "**\n\n"
 	}
 	s += fmt.Sprintf("> %s %d\n", tl("已注销对话", "Deleted-account dialogs"), len(byID))
+	if truncated {
+		s += fmt.Sprintf("> ⚠️ %s（%d %s）\n", tl("对话数超过扫描上限，结果可能不全", "More dialogs than the scan cap; the list may be incomplete"),
+			dialogsGuard, tl("页", "pages"))
+	}
 	if rm {
 		s += fmt.Sprintf("> %s %d", tl("已移除", "Removed"), removed)
 		if failed > 0 {
@@ -290,6 +298,8 @@ func (p *CleanPlugin) cleanDeletedMember(j *job, rm bool) {
 	var entries []entry
 	scanned := 0
 	offset := 0
+	kicked := 0 // removals shift the list up; the offset lags by them
+	seen := map[int64]bool{}
 	for offset <= memberScanMax {
 		if err := j.Context().Err(); err != nil {
 			return
@@ -315,20 +325,27 @@ func (p *CleanPlugin) cleanDeletedMember(j *job, rm bool) {
 			break
 		}
 		for _, u := range cp.Users {
-			if v, ok := u.(*tg.User); ok && v.Deleted {
-				found++
-				e := entry{id: v.ID, hash: v.AccessHash}
-				if rm {
-					if err := p.kickDeleted(j, v); err != nil {
-						failed++
-						e.err = errText(tl, err)
-					} else {
-						removed++
-						e.ok = true
-					}
-				}
-				entries = append(entries, e)
+			v, ok := u.(*tg.User)
+			if !ok || !v.Deleted || v.ID == 0 {
+				continue
 			}
+			if seen[v.ID] {
+				continue // slid back into this window after a kick
+			}
+			seen[v.ID] = true
+			found++
+			e := entry{id: v.ID, hash: v.AccessHash}
+			if rm {
+				if err := p.kickDeleted(j, v); err != nil {
+					failed++
+					e.err = errText(tl, err)
+				} else {
+					removed++
+					e.ok = true
+					kicked++
+				}
+			}
+			entries = append(entries, e)
 		}
 		scanned += len(cp.Participants)
 		j.progress(fmt.Sprintf("🔍 %s\n\n> %s %d\n> %s %d\n\n⏳ %s",
@@ -339,7 +356,8 @@ func (p *CleanPlugin) cleanDeletedMember(j *job, rm bool) {
 		if len(cp.Participants) < memberPage {
 			break
 		}
-		offset += memberPage
+		// Each kick shifts the remaining list up by one.
+		offset += len(cp.Participants) - kicked
 		sleepCtx(j.Context(), 100*time.Millisecond)
 	}
 

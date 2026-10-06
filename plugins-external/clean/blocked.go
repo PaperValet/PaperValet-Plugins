@@ -71,6 +71,8 @@ func (p *CleanPlugin) cleanBlockedPM(j *job, all bool) {
 	var ok, failed, skipped int
 	total := 0
 	start := time.Now()
+	var failedIDs []int64 // retry once after the paged pass
+	failedNames := map[int64]string{}
 	// Unblocking removes the entry, so the offset only advances by the
 	// entries skipped in a batch (matching the source's pagination).
 	offset := 0
@@ -126,10 +128,16 @@ func (p *CleanPlugin) cleanBlockedPM(j *job, all bool) {
 			case err == nil:
 				ok++
 			case fatalErr(err):
-				p.finishErr(j.CommandContext, err)
+				// Keep the progress made: report what was done before
+				// the fatal error, not just the error text.
+				p.finish(j.CommandContext,
+					blockedResult(tl, ok, failed, skipped, total, all)+"\n\n❌ "+errText(tl, err),
+					resultTTL)
 				return
 			default:
 				failed++
+				failedIDs = append(failedIDs, pu.UserID)
+				failedNames[pu.UserID] = blockedName(u)
 			}
 			sleepCtx(j.Context(), unblockDelay(u, all))
 		}
@@ -139,7 +147,55 @@ func (p *CleanPlugin) cleanBlockedPM(j *job, all bool) {
 		}
 		j.progress(blockedProgress(tl, ok+failed+skipped, total, ok, failed, skipped, all, time.Since(start)))
 	}
-	p.finish(j.CommandContext, blockedResult(tl, ok, failed, skipped, total, all), resultTTL)
+	// One retry round for the entries that failed in the paged pass:
+	// without it they would be silently skipped forever.
+	for _, uid := range failedIDs {
+		if err := j.Context().Err(); err != nil {
+			return
+		}
+		err := retry(j.Context(), func() error {
+			_, e := j.API.ContactsUnblock(j.Context(), &tg.ContactsUnblockRequest{
+				ID: &tg.InputPeerUser{UserID: uid},
+			})
+			return e
+		})
+		if err == nil {
+			ok++
+			failed--
+		} else if fatalErr(err) {
+			break
+		}
+		sleepCtx(j.Context(), minDelay)
+	}
+	out := blockedResult(tl, ok, failed, skipped, total, all)
+	if failed > 0 && len(failedIDs) > 0 {
+		// Name the stubborn ones (up to ten) so the user can fix them.
+		var names []string
+		for _, uid := range failedIDs {
+			if n, seen := failedNames[uid]; seen && n != "" {
+				names = append(names, n)
+			}
+			if len(names) >= 10 {
+				break
+			}
+		}
+		if len(names) > 0 {
+			out += "\n⚠️ " + tl("仍失败：", "Still failing: ") + plugin.Escape(strings.Join(names, ", "))
+		}
+	}
+	p.finish(j.CommandContext, out, resultTTL)
+}
+
+// blockedName renders a display name for the failed list.
+func blockedName(u *tg.User) string {
+	name := strings.TrimSpace(strings.TrimSpace(u.FirstName) + " " + strings.TrimSpace(u.LastName))
+	if name == "" {
+		name = u.Username
+	}
+	if name == "" {
+		return fmt.Sprintf("%d", u.ID)
+	}
+	return name + " (" + fmt.Sprintf("%d", u.ID) + ")"
 }
 
 // blockedPeersOf returns the blocked entries of a getBlocked result.
