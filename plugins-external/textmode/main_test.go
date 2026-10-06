@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gotd/td/tg"
@@ -341,5 +342,52 @@ func TestEffectiveForStatus(t *testing.T) {
 	}
 	if got := s.effective(1, modeBold); got != modeBold {
 		t.Errorf("chat off falls to global = %v", got)
+	}
+}
+
+// ---------------------------------------------------------------- listener gates
+
+// textmodeCandidate mirrors the listener's accept gate for one message: the
+// same conditions onMessage checks before handing off to the edit goroutine.
+func textmodeCandidate(edited, isOut, hasMedia bool, text string, prefixes []string, m mode) bool {
+	if edited || !isOut || hasMedia {
+		return false
+	}
+	if strings.TrimSpace(text) == "" {
+		return false
+	}
+	if isCommand(text, prefixes) {
+		return false
+	}
+	if m == modeOff {
+		return false
+	}
+	return len(modeEntities(m)) > 0
+}
+
+func TestListenerGates(t *testing.T) {
+	prefixes := []string{"."}
+	// Media captions (albums) are never edited, even with text.
+	if textmodeCandidate(false, true, true, "看图", prefixes, modeBold) {
+		t.Error("media caption must be skipped")
+	}
+	// Whitespace-only text is skipped, but text with surrounding whitespace
+	// is a candidate — and the edit must use the untrimmed original.
+	if textmodeCandidate(false, true, false, "  \n ", prefixes, modeBold) {
+		t.Error("whitespace-only must be skipped")
+	}
+	if !textmodeCandidate(false, true, false, "\n你好 x\n", prefixes, modeBold) {
+		t.Error("padded text must be a candidate")
+	}
+	// The entity layer must cover the untrimmed text length, proving the
+	// original (not the trimmed copy) is what gets edited.
+	text := "\n你好 x\n"
+	ents := buildEntities(nil, text, modeEntities(modeBold))
+	b := ents[0].(*tg.MessageEntityBold)
+	if want := utf16Len(text); b.Length != want {
+		t.Errorf("bold length = %d, want %d (untrimmed text)", b.Length, want)
+	}
+	if utf16Len(text) == utf16Len(strings.TrimSpace(text)) {
+		t.Error("test text must actually have padding")
 	}
 }

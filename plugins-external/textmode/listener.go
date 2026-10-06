@@ -90,8 +90,16 @@ func (p *TextmodePlugin) onMessage(_ context.Context, ev *plugin.MessageEvent, e
 	if edited || ev == nil || ev.Message == nil || !ev.IsOut {
 		return
 	}
-	text := strings.TrimSpace(ev.Text)
-	if text == "" {
+	if ev.Media != nil {
+		// Media captions are skipped: an album shares one caption, so
+		// editing it would re-format the whole media group.
+		return
+	}
+	// Judge emptiness on the trimmed text but edit the original: the
+	// promise is "format only, never touch the content", so leading or
+	// trailing whitespace (newlines included) must survive the edit.
+	text := ev.Text
+	if strings.TrimSpace(text) == "" {
 		return
 	}
 	if isCommand(text, p.host.Prefixes()) {
