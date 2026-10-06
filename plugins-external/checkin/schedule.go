@@ -124,7 +124,10 @@ type plan struct {
 }
 
 // dueState reports whether the planned time is still in the future, due
-// today, or already missed (past the day).
+// today, or already missed (past the day). A run planned just before
+// midnight and first seen a few minutes after gets a small grace window so
+// clock/order jitter around the day boundary does not silently skip the
+// day's check-in.
 func dueState(now, at time.Time, loc *time.Location) dueKind {
 	if now.Before(at) {
 		return stateWait
@@ -132,8 +135,15 @@ func dueState(now, at time.Time, loc *time.Location) dueKind {
 	if localDate(now, loc) == localDate(at, loc) {
 		return stateRun
 	}
+	if now.Sub(at) <= dayBoundaryGrace {
+		return stateRun
+	}
 	return stateMissed
 }
+
+// dayBoundaryGrace tolerates the 23:5x → 00:0x date flip for runs that were
+// planned before midnight.
+const dayBoundaryGrace = 10 * time.Minute
 
 type dueKind int
 

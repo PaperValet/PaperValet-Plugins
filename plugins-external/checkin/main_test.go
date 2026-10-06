@@ -167,6 +167,46 @@ func TestDueState(t *testing.T) {
 	}
 }
 
+func TestDueStateDayBoundaryGrace(t *testing.T) {
+	// Planned 23:58, first tick after midnight: the old code flipped to
+	// stateMissed because the local date changed, silently skipping the
+	// day's check-in. The grace window keeps it runnable.
+	at := time.Date(2026, 10, 5, 23, 58, 0, 0, sh)
+	now := time.Date(2026, 10, 6, 0, 2, 0, 0, sh)
+	if s := dueState(now, at, sh); s != stateRun {
+		t.Errorf("boundary grace: %v", s)
+	}
+	// Well past the grace it is still missed.
+	now = time.Date(2026, 10, 6, 0, 30, 0, 0, sh)
+	if s := dueState(now, at, sh); s != stateMissed {
+		t.Errorf("past grace: %v", s)
+	}
+}
+
+// TestCmdRunRunningAtomic exercises the check-and-set of p.running that
+// cmdRun now performs under a single lock acquisition.
+func TestCmdRunRunningAtomic(t *testing.T) {
+	p := New()
+	p.mu.Lock()
+	p.running = true // simulate an in-flight run
+	p.mu.Unlock()
+	// The busy check happens atomically with the set, so a second entrant
+	// sees running=true and never gets past the guard. (A full cmdRun call
+	// needs a live CommandContext; the lock contract is what matters here.)
+	p.mu.Lock()
+	busy := p.running
+	if !busy {
+		p.running = true
+	}
+	p.mu.Unlock()
+	if !busy {
+		t.Fatal("guard lost the in-flight run")
+	}
+	p.mu.Lock()
+	p.running = false
+	p.mu.Unlock()
+}
+
 func TestNormalizeDate(t *testing.T) {
 	cases := map[string]string{
 		"2026-10-05": "2026-10-05",

@@ -19,28 +19,34 @@ func (p *CheckinPlugin) cmdRun(ctx *plugin.CommandContext) error {
 	if len(p.enabledTargets()) == 0 {
 		return ctx.Edit("❌ " + tl("没有启用的签到目标，先用 ", "no enabled targets; use ") + plugin.Code("checkin add"))
 	}
+	// Check-and-set p.running in one critical section: the old read-then-
+	// set-later-in-goroutine let a manual run race the scheduler tick and
+	// double-run every target.
 	p.mu.Lock()
-	busy := p.running
-	p.mu.Unlock()
-	if busy {
+	if p.running {
+		p.mu.Unlock()
 		return ctx.Edit("⏳ " + tl("签到任务正在执行", "a sign-in run is already in progress"))
 	}
+	p.running = true
+	p.mu.Unlock()
 	if err := ctx.Edit("🚀 " + tl("开始执行所有签到任务...", "Running all sign-in tasks...")); err != nil {
+		p.mu.Lock()
+		p.running = false
+		p.mu.Unlock()
 		return err
 	}
 	msgID := ctx.Message.Message.ID
 	chatID := ctx.Message.ChatID
 	peer := ctx.PeerResolver
 	go func() {
+		defer func() {
+			p.mu.Lock()
+			p.running = false
+			p.mu.Unlock()
+		}()
 		runCtx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		p.mu.Lock()
-		p.running = true
-		p.mu.Unlock()
 		p.runAll(runCtx, sourceManual, chatID)
-		p.mu.Lock()
-		p.running = false
-		p.mu.Unlock()
 		// The summary lands in the notify chat; remove the progress message.
 		if resolved, err := peer.ResolveFromChatID(runCtx, chatID); err == nil {
 			_ = plugin.DeleteMessages(runCtx, p.api, resolved, msgID)

@@ -144,11 +144,21 @@ func (p *CheckinPlugin) pollHistory(
 			Limit:    10,
 		})
 		if err != nil {
-			if d, ok := tgerr.AsFloodWait(err); ok && d <= time.Minute {
-				select {
-				case <-time.After(d):
-				case <-ctx.Done():
-					return nil
+			if d, ok := tgerr.AsFloodWait(err); ok {
+				// Respect the flood window instead of hammering the
+				// API every second while rate-limited: sleep min(d,
+				// time left to the deadline), then retry.
+				remaining := time.Until(deadline)
+				wait := d + time.Second
+				if wait > remaining {
+					wait = remaining
+				}
+				if wait > 0 {
+					select {
+					case <-time.After(wait):
+					case <-ctx.Done():
+						return nil
+					}
 				}
 			}
 			continue
@@ -200,7 +210,7 @@ func (p *CheckinPlugin) runSingle(ctx context.Context, t Target) runResult {
 	if err != nil {
 		return fail(fmt.Errorf("resolve %s: %w", t.Target, err))
 	}
-	sentID, err := p.sendCommand(ctx, peer, t.Command)
+	sentMsgID, err := p.sendCommand(ctx, peer, t.Command)
 	if err != nil {
 		if d, ok := tgerr.AsFloodWait(err); ok {
 			return fail(fmt.Errorf("FLOOD_WAIT %ds", int(d.Seconds())))
@@ -211,7 +221,7 @@ func (p *CheckinPlugin) runSingle(ctx context.Context, t Target) runResult {
 	needButton := hasMatcher(&t)
 	var first *tg.Message
 	if needButton {
-		first = p.pollHistory(ctx, peer, sentID-1, func(msgs []*tg.Message) *tg.Message {
+		first = p.pollHistory(ctx, peer, sentMsgID-1, func(msgs []*tg.Message) *tg.Message {
 			for _, m := range msgs {
 				if !m.Out && findCallbackData(m, &t) != nil {
 					return m
@@ -220,7 +230,7 @@ func (p *CheckinPlugin) runSingle(ctx context.Context, t Target) runResult {
 			return nil
 		})
 	} else {
-		first = p.pollHistory(ctx, peer, sentID-1, func(msgs []*tg.Message) *tg.Message {
+		first = p.pollHistory(ctx, peer, sentMsgID-1, func(msgs []*tg.Message) *tg.Message {
 			for _, m := range msgs {
 				if !m.Out {
 					return m

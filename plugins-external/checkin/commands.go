@@ -16,13 +16,15 @@ func (p *CheckinPlugin) handle(ctx *plugin.CommandContext) error {
 	if ctx.Message == nil || ctx.Message.Message == nil {
 		return plugin.ErrNoMessage
 	}
+	// Refresh the live client/resolver under the lock: the scheduler
+	// goroutine (runSingle/pollHistory) reads the same fields.
+	p.mu.Lock()
 	if ctx.API != nil {
 		p.api = ctx.API
 	}
 	if ctx.PeerResolver != nil {
 		p.resolver = ctx.PeerResolver
 	}
-	p.mu.Lock()
 	running := p.cancel != nil
 	p.mu.Unlock()
 	if !running {
