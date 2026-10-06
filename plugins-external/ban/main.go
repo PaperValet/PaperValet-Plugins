@@ -21,6 +21,7 @@ const (
 	batchWorkers   = 4
 	maxBatchFlood  = 8 * time.Second
 	dialogsPerPage = 100
+	dialogsGuard   = 50 // pages per folder; 50×100 dialogs is plenty
 	groupsFile     = "groups.json"
 	maxMute        = 366 * 86400 // Telegram treats longer mutes as permanent
 )
@@ -335,6 +336,11 @@ func (p *BanPlugin) single(ctx *plugin.CommandContext, action string) error {
 		}
 	} else {
 		if !p.meCanBan(ctx, channel) {
+			if action == "mute" {
+				// meCanBan accepts delete-message admins too, but muting
+				// needs the ban right itself; name it correctly.
+				return p.oops(ctx, "❌ "+tl("需要封禁成员的管理员权限（禁言）", "The admin right to ban members is needed (muting)"))
+			}
 			return p.oops(ctx, "❌ "+tl("需要封禁成员的管理员权限", "The admin right to ban members is needed"))
 		}
 		if !confirm && p.isTargetAdmin(ctx, channel, t) {
@@ -393,9 +399,14 @@ func (p *BanPlugin) single(ctx *plugin.CommandContext, action string) error {
 				return editBanned(ctx.Context(), ctx.API, ch, t.peer(), "ban")
 			})
 			if actErr == nil {
-				actErr = retryFlood(ctx.Context(), func() error {
+				if uerr := retryFlood(ctx.Context(), func() error {
 					return editBanned(ctx.Context(), ctx.API, ch, t.peer(), "unban")
-				})
+				}); uerr != nil {
+					// The ban landed; the unban did not. The user is
+					// banned, not kicked — surface that clearly.
+					return fmt.Errorf("%s\n> ⚠️ %s", uerr.Error(),
+						tl("已封禁但解封失败，请手动 unban", "banned but the unban failed; run unban manually"))
+				}
 			}
 		}
 	case "unban", "unmute":
@@ -417,6 +428,12 @@ func (p *BanPlugin) single(ctx *plugin.CommandContext, action string) error {
 		})
 	}
 	if actErr != nil {
+		if action == "ban" && wiped {
+			// deleteHistoryCurrent ran before the ban and already removed
+			// the target's messages; the user must know that happened.
+			return p.oops(ctx, "❌ "+errText(tl, actErr)+
+				"\n> ⚠️ "+tl("其在本群的消息已被清理（封禁本身未生效）", "their messages here were already wiped (the ban itself failed)"))
+		}
 		return p.oops(ctx, "❌ "+errText(tl, actErr))
 	}
 

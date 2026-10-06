@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
@@ -244,13 +245,14 @@ func (p *BanPlugin) loadGroups(ctx context.Context, force bool) ([]managedGroup,
 
 // scanGroups enumerates every dialog (main list + archived folder 1) and
 // keeps the chats where the account can ban: creator, or admin with
-// ban/delete rights.
+// ban/delete rights. The pagination is bounded by dialogsGuard pages per
+// folder so a huge account can never loop forever.
 func (p *BanPlugin) scanGroups(ctx context.Context) ([]managedGroup, error) {
 	chats := map[int64]tg.ChatClass{}
 	for _, folder := range []int{0, 1} {
 		offsetDate, offsetID := 0, 0
 		var offsetPeer tg.InputPeerClass = &tg.InputPeerEmpty{}
-		for {
+		for page := 0; page < dialogsGuard; page++ {
 			req := &tg.MessagesGetDialogsRequest{
 				OffsetDate: offsetDate,
 				OffsetID:   offsetID,
@@ -384,11 +386,27 @@ func writeGroups(path string, g []managedGroup) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	// CreateTemp (like every other plugin): a fixed .tmp name would let a
+	// crashed run's leftover fight with the next write.
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	name := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(name)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(name)
+		return err
+	}
+	if err := os.Chmod(name, 0o600); err != nil {
+		os.Remove(name)
+		return err
+	}
+	return os.Rename(name, path)
 }
 
 // ============================================================
@@ -396,24 +414,50 @@ func writeGroups(path string, g []managedGroup) error {
 // ============================================================
 
 // adminEverywhere counts the managed supergroups where the target is an
-// admin, for the true-confirmation guard.
+// admin, for the true-confirmation guard. Requests run concurrently (like
+// the batch) and retry through short flood waits, so the confirm stage is
+// fast and flood-tolerant on accounts managing many groups.
 func (p *BanPlugin) adminEverywhere(ctx *plugin.CommandContext, t target, groups []managedGroup) int {
-	n := 0
+	var channels []managedGroup
 	for _, g := range groups {
-		if g.Kind != "channel" {
-			continue
-		}
-		res, err := ctx.API.ChannelsGetParticipant(ctx.Context(), &tg.ChannelsGetParticipantRequest{
-			Channel: g.channel(), Participant: t.peer(),
-		})
-		if err != nil {
-			continue
-		}
-		switch res.Participant.(type) {
-		case *tg.ChannelParticipantCreator, *tg.ChannelParticipantAdmin:
-			n++
+		if g.Kind == "channel" {
+			channels = append(channels, g)
 		}
 	}
+	var (
+		mu  sync.Mutex
+		wg  sync.WaitGroup
+		n   int
+		sem = make(chan struct{}, batchWorkers)
+	)
+	for _, g := range channels {
+		wg.Add(1)
+		go func(g managedGroup) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			isAdmin := false
+			err := retryFlood(ctx.Context(), func() error {
+				res, err := ctx.API.ChannelsGetParticipant(ctx.Context(), &tg.ChannelsGetParticipantRequest{
+					Channel: g.channel(), Participant: t.peer(),
+				})
+				if err == nil {
+					switch res.Participant.(type) {
+					case *tg.ChannelParticipantCreator, *tg.ChannelParticipantAdmin:
+						isAdmin = true
+					}
+				}
+				return err
+			})
+			if err != nil || !isAdmin {
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			n++
+		}(g)
+	}
+	wg.Wait()
 	return n
 }
 
