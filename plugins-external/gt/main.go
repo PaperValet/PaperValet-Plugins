@@ -87,6 +87,7 @@ func (p *GtPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 		UsageEN:     "gt [target] <text> | reply with gt [target] | gt help",
 		Plugin:      p.Name(),
 		Category:    "tools",
+		RateLimit:   5,
 		Handler:     p.handleTranslate,
 	})
 }
@@ -380,16 +381,24 @@ type result struct {
 
 const browserUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
+// translateTimeout bounds the whole backend chain (three endpoints, tried
+// in turn); each request also keeps the client's own timeout.
+const translateTimeout = 20 * time.Second
+
 // translate tries several keyless Google endpoints in turn. The classic
 // translate_a/single (gtx) endpoint is often 429-limited from server IPs, so
-// it is tried last.
+// it is tried last. The whole chain is bounded by translateTimeout: three
+// backends × client timeout, possibly twice with flip, would otherwise be
+// a minute of "translating…".
 func (p *GtPlugin) translate(ctx context.Context, text, target string) (*result, error) {
+	tctx, cancel := context.WithTimeout(ctx, translateTimeout)
+	defer cancel()
 	backends := []func(context.Context, string, string) (*result, error){
 		p.viaDictChrome, p.viaBatchExecute, p.viaGtx,
 	}
 	var errs []string
 	for _, b := range backends {
-		r, err := b(ctx, text, target)
+		r, err := b(tctx, text, target)
 		if err == nil && strings.TrimSpace(r.text) != "" {
 			return r, nil
 		}
@@ -397,7 +406,7 @@ func (p *GtPlugin) translate(ctx context.Context, text, target string) (*result,
 			err = errors.New("empty result")
 		}
 		errs = append(errs, err.Error())
-		if ctx.Err() != nil {
+		if tctx.Err() != nil {
 			break
 		}
 	}
