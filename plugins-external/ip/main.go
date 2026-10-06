@@ -46,6 +46,7 @@ func (p *IPPlugin) Init(_ context.Context, mgr plugin.Manager) error {
 		UsageEN:     "ip <IP|domain|URL> · reply: ip",
 		Plugin:      p.Name(),
 		Category:    "tools",
+		RateLimit:   3,
 		Handler:     p.handle,
 	})
 }
