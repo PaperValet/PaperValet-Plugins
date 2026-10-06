@@ -359,3 +359,76 @@ func equalIDs(a, b []int) bool {
 	}
 	return true
 }
+
+// Regexp tasks cache their compiled form: matching twice must reuse it, and
+// a broken pattern must simply never match (not panic, not recompile).
+func TestRegexpCache(t *testing.T) {
+	tk := &task{Key: `^a\d+$`, Regexp: true}
+	if !tk.matches("a42") {
+		t.Fatal("regexp task should match")
+	}
+	if tk.matches("b42") {
+		t.Fatal("regexp task must not match wrong text")
+	}
+	re := tk.compiled()
+	if re == nil {
+		t.Fatal("compiled cache empty after a match")
+	}
+	if tk.compiled() != re {
+		t.Fatal("compiled() must return the cached pointer")
+	}
+	// case-insensitive via the (?i) prefix
+	ci := &task{Key: "abc", Regexp: true}
+	if !ci.matches("ABC") {
+		t.Fatal("regexp default must be case-insensitive")
+	}
+	cs := &task{Key: "abc", Regexp: true, CaseSensitive: true}
+	if cs.matches("ABC") {
+		t.Fatal("case-sensitive regexp must not match other case")
+	}
+	// broken pattern: cold, never matches
+	bad := &task{Key: "(", Regexp: true}
+	if bad.matches("(") || bad.matches("x") {
+		t.Fatal("broken regexp must never match")
+	}
+	if bad.compiled() != nil {
+		t.Fatal("broken regexp must not cache anything")
+	}
+	if bad.matches("(") {
+		t.Fatal("broken regexp still matching after retry")
+	}
+	// Changing CaseSensitive after the cache exists must rebuild it.
+	fl := &task{Key: "abc", Regexp: true}
+	if !fl.matches("ABC") {
+		t.Fatal("ci default must match")
+	}
+	fl.CaseSensitive = true
+	if fl.matches("ABC") {
+		t.Fatal("flag flip must invalidate the cache")
+	}
+	if !fl.matches("abc") {
+		t.Fatal("case-sensitive rebuild must still match exact case")
+	}
+}
+
+// $code_name carries the raw sender name into the reply text; markdown
+// metacharacters in it must be escaped so they cannot break the reply.
+func TestRenderEscapesCodeName(t *testing.T) {
+	tk := &task{Msg: "hi $code_name and $code_id"}
+	out := tk.render(12345, "a*b_c`d")
+	if !strings.Contains(out, `a\*b\_c\`+"`d") {
+		t.Fatalf("$code_name not escaped: %q", out)
+	}
+	if !strings.Contains(out, "12345") {
+		t.Fatalf("$code_id missing: %q", out)
+	}
+	// $mention renders a mention link; its text part is escaped by
+	// plugin.Mention itself (verified in the markdown layer tests).
+	if m := (&task{Msg: "$mention"}).render(1, "x*y"); !strings.Contains(m, `x\*y`) {
+		t.Fatalf("$mention text not escaped: %q", m)
+	}
+	// No identity (channel post): all three variables vanish.
+	if out := (&task{Msg: "[$code_name]($code_id)$mention"}).render(0, ""); strings.Contains(out, "$") {
+		t.Fatalf("variables must vanish without identity: %q", out)
+	}
+}

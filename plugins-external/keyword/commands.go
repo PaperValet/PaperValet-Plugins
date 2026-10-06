@@ -89,9 +89,11 @@ func (p *KeywordPlugin) cmdAdd(ctx *plugin.CommandContext) error {
 		return ctx.Edit("❌ " + tl("参数错误: ", "Invalid arguments: ") + plugin.Escape(err.Error()) + "\n\n" + plugin.Code("keyword help"))
 	}
 	if t.Regexp {
-		if _, err := compileRegexp(t.Key, t.CaseSensitive); err != nil {
+		re, err := compileRegexp(t.Key, t.CaseSensitive)
+		if err != nil {
 			return ctx.Edit("❌ " + tl("正则表达式无效: ", "Invalid regexp: ") + plugin.Escape(err.Error()))
 		}
+		t.re = re // cache: the hot path must not compile again
 	}
 	p.mu.Lock()
 	t.ID = p.nextID
@@ -232,12 +234,34 @@ func (p *KeywordPlugin) cmdRm(ctx *plugin.CommandContext, idsArg string) error {
 		success++
 	}
 	var saveErr error
+	var orphaned []int64
 	if success > 0 {
 		saveErr = p.saveLocked()
+		// Chats aliasing a group whose tasks are now all gone inherit
+		// nothing; list them so the owner can remove the dead alias.
+		tasksPerChat := map[int64]int{}
+		for _, t := range p.tasks {
+			tasksPerChat[t.ChatID]++
+		}
+		for from, to := range p.alias {
+			if tasksPerChat[to] == 0 {
+				orphaned = append(orphaned, from)
+			}
+		}
 	}
 	p.mu.Unlock()
-	return ctx.Edit("✅ " + fmt.Sprintf(tl("已删除任务 %d 个，失败 %d 个", "Deleted %d tasks, %d failed"), success, failed) +
-		errSuffix(saveErr, tl))
+	msg := "✅ " + fmt.Sprintf(tl("已删除任务 %d 个，失败 %d 个", "Deleted %d tasks, %d failed"), success, failed) +
+		errSuffix(saveErr, tl)
+	if len(orphaned) > 0 {
+		sort.Slice(orphaned, func(i, j int) bool { return orphaned[i] < orphaned[j] })
+		var ids []string
+		for _, from := range orphaned {
+			ids = append(ids, plugin.Code(from))
+		}
+		msg += "\n⚠️ " + tl("以下会话继承的群已无任务：", "These chats inherit from a group with no tasks left: ") +
+			strings.Join(ids, ", ")
+	}
+	return ctx.Edit(msg)
 }
 
 func (p *KeywordPlugin) cmdAlias(ctx *plugin.CommandContext) error {

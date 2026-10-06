@@ -28,6 +28,11 @@ type task struct {
 	ChatID int64  `json:"cid"`
 	Key    string `json:"key"`
 	Msg    string `json:"msg"`
+	// re caches the compiled regexp (regexp tasks only), so the hot
+	// message path never compiles under the plugin lock. reCase records
+	// the flags it was built with; a flag change rebuilds the cache.
+	re     *regexp.Regexp
+	reCase bool
 	// Match options (third +++ segment, space separated).
 	Include       bool `json:"include"`        // contains match (default)
 	Regexp        bool `json:"regexp"`         // regex match
@@ -153,6 +158,21 @@ func parseIntOrZero(s string) int {
 	return n
 }
 
+// compiled returns the cached regexp for this task, or nil when it does
+// not compile (the task then never matches, like a broken source rule).
+func (t *task) compiled() *regexp.Regexp {
+	if t.re != nil && t.reCase == t.CaseSensitive {
+		return t.re
+	}
+	re, err := compileRegexp(t.Key, t.CaseSensitive)
+	if err != nil {
+		t.re, t.reCase = nil, t.CaseSensitive
+		return nil
+	}
+	t.re, t.reCase = re, t.CaseSensitive
+	return re
+}
+
 // matches reports whether the task's key matches text (message body or
 // caption). Mirrors checkNeedReply.
 func (t *task) matches(text string) bool {
@@ -160,11 +180,10 @@ func (t *task) matches(text string) bool {
 		return false
 	}
 	if t.Regexp {
-		re, err := compileRegexp(t.Key, t.CaseSensitive)
-		if err != nil {
-			return false
+		if re := t.compiled(); re != nil {
+			return re.MatchString(text)
 		}
-		return re.MatchString(text)
+		return false
 	}
 	key, msg := t.Key, text
 	if !t.CaseSensitive {
@@ -185,10 +204,12 @@ func (t *task) render(userID int64, name string) string {
 		if name == "" {
 			name = fmt.Sprintf("%d", userID)
 		}
-		// One pass per variable: str.Replace(-1) like the source.
+		// One pass per variable: str.Replace(-1) like the source. The
+		// name is user-controlled: escape it so markdown metacharacters
+		// cannot break the reply's formatting (the source escaped too).
 		text = strings.ReplaceAll(text, "$mention", mentionText(name, userID))
 		text = strings.ReplaceAll(text, "$code_id", strconv.FormatInt(userID, 10))
-		text = strings.ReplaceAll(text, "$code_name", name)
+		text = strings.ReplaceAll(text, "$code_name", plugin.Escape(name))
 	} else {
 		text = strings.ReplaceAll(text, "$mention", "")
 		text = strings.ReplaceAll(text, "$code_id", "")

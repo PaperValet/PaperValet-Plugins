@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 
 	"github.com/TiaraBasori/PaperValet/pkg/plugin"
 )
@@ -122,6 +123,11 @@ func (p *KeywordPlugin) load(path string) error {
 	for _, t := range store.Tasks {
 		if t == nil || t.ID <= 0 || t.Key == "" || t.Msg == "" {
 			continue
+		}
+		if t.Regexp && t.compiled() == nil {
+			// Broken regexp from an older save: never matches; keep it
+			// listed (the owner can fix or remove it) but it stays cold.
+			t.re = nil
 		}
 		p.tasks = append(p.tasks, t)
 		if t.ID > maxID {
@@ -361,8 +367,17 @@ func (p *KeywordPlugin) fire(ctx context.Context, chatID int64, t *task, ev *plu
 		replyTo = ev.Message.ID
 	}
 	sentID, err := p.host.Send(sctx, chatID, text, replyTo)
-	if err != nil && p.log != nil {
-		p.log.Warn("keyword: send reply failed", "task", t.ID, "error", err)
+	if err != nil {
+		if p.log != nil {
+			p.log.Warn("keyword: send reply failed", "task", t.ID, "error", err)
+		}
+		// The cooldown was taken when the task matched; a failed send
+		// should not burn it (the next matching message retries).
+		if t.Cooldown > 0 {
+			p.mu.Lock()
+			delete(p.cool, t.ID)
+			p.mu.Unlock()
+		}
 	}
 
 	if t.Delete || t.SourceDelayDelete > 0 {
@@ -413,8 +428,21 @@ func (p *KeywordPlugin) moderate(ctx context.Context, chatID int64, ev *plugin.M
 		Participant:  &tg.InputPeerUser{UserID: userID},
 		BannedRights: rights,
 	})
-	if err != nil && p.log != nil {
-		p.log.Warn("keyword: ban/restrict failed", "chat", chatID, "user", userID, "error", err)
+	if err != nil {
+		if p.log != nil {
+			p.log.Warn("keyword: ban/restrict failed", "chat", chatID, "user", userID, "error", err)
+		}
+		// Rights problems (admin target, missing rights) must not stay
+		// silent: the reply already went out, so warn the chat once.
+		if tgerr.Is(err, "USER_ADMIN_INVALID", "CHAT_ADMIN_REQUIRED", "PARTICIPANT_ID_INVALID") {
+			verb := "restrict"
+			if t.Ban > 0 {
+				verb = "ban"
+			}
+			wctx, wcancel := context.WithTimeout(context.Background(), sendWait)
+			defer wcancel()
+			_, _ = p.host.Send(wctx, chatID, "⚠️ "+verb+" failed: "+plugin.Escape(err.Error()), 0)
+		}
 	}
 }
 
