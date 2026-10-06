@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -50,6 +53,66 @@ func TestParseMappingLines(t *testing.T) {
 	if m["a.com"] != "机场A" || m["b.com"] != "B" {
 		t.Fatalf("m = %v", m)
 	}
+}
+
+// mappingName must be deterministic: the same URL yields the same name on
+// every call even when several keys match. With sorted-key iteration the
+// first key in lexicographic order that is contained in the URL wins — a
+// stable, testable rule (the old map iteration was random).
+func TestMappingNameDeterministic(t *testing.T) {
+	m := map[string]string{"z.example.com": "Z", "a.example.com": "A", "sub.a.example.com": "Sub"}
+	// "a.example.com" sorts before "sub.a.example.com" and is a substring of
+	// the URL, so it wins — deterministically on every iteration.
+	for i := 0; i < 50; i++ {
+		if got := mappingName(m, "https://sub.a.example.com/link"); got != "A" {
+			t.Fatalf("iteration %d: got %q, want A (sorted-key order must be stable)", i, got)
+		}
+	}
+	if got := mappingName(m, "https://z.example.com/x"); got != "Z" {
+		t.Fatalf("got %q, want Z", got)
+	}
+	if got := mappingName(m, "https://sub.a.example.com/x"); got != "A" {
+		t.Fatalf("got %q, want A", got)
+	}
+	if got := mappingName(m, "https://other.com/x"); got != "" {
+		t.Fatalf("no match should be empty, got %q", got)
+	}
+}
+
+// mappingCache must not hold its lock while fetching: concurrent getters
+// join the in-flight fetch instead of each hitting the remote.
+func TestMappingCacheSingleFlight(t *testing.T) {
+	release := make(chan struct{})
+	h := &httpClient{client: &http.Client{Transport: fakeTransport{func(r *http.Request) *http.Response {
+		<-release // keep the fetch slow until the test lets it finish
+		body := "a.com=A\n"
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}}
+	}}}}
+	c := &mappingCache{}
+	done := make(chan struct{})
+	go func() { defer close(done); c.get(context.Background(), h) }()
+
+	// While the fetch is in flight a second getter must return quickly once
+	// the fetch settles (it joins rather than starting a second request).
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	m := c.get(context.Background(), h)
+	<-done
+	if m == nil || m["a.com"] != "A" {
+		t.Fatalf("second getter got %v", m)
+	}
+	// TTL hit: no new fetch, value stable.
+	if m2 := c.get(context.Background(), h); m2["a.com"] != "A" {
+		t.Fatalf("ttl getter got %v", m2)
+	}
+}
+
+type fakeTransport struct {
+	fn func(*http.Request) *http.Response
+}
+
+func (f fakeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f.fn(r), nil
 }
 
 func TestExtractURLs(t *testing.T) {

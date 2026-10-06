@@ -6,9 +6,11 @@ import (
 	"html"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,31 +36,86 @@ const (
 var baseURLRe = regexp.MustCompile(`https?://[^/]+`)
 var titleRe = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
 
+// isPrivateHost reports whether the URL points at a private or loopback
+// address. Reply-mode candidates come from arbitrary users' messages, so the
+// plugin must not be tricked into probing internal networks (weak SSRF).
+func isPrivateHost(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return true
+	}
+	host := u.Hostname()
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified()
+	}
+	// A hostname resolving into private space is harder to check without a
+	// lookup; block the obvious local names and numeric-looking hosts.
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") {
+		return true
+	}
+	return net.ParseIP(host) != nil
+}
+
 // mappingCache caches the remote key=name provider mapping for 10 minutes.
+// The fetch runs outside the lock (singleflight): queryAll's parallel
+// goroutines would otherwise all block on one slow remote fetch.
 type mappingCache struct {
 	mu       sync.Mutex
 	mappings map[string]string
 	fetched  time.Time
+	fetching chan struct{} // closed when the in-flight fetch finished
 }
 
 const mappingTTL = 10 * time.Minute
 
 func (c *mappingCache) get(ctx context.Context, h *httpClient) map[string]string {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if len(c.mappings) > 0 && time.Since(c.fetched) < mappingTTL {
+		c.mu.Unlock()
 		return c.mappings
 	}
-	m, err := fetchRemoteMappings(ctx, h.client)
-	if err != nil || len(m) == 0 {
-		if len(c.mappings) > 0 {
-			return c.mappings // keep stale rather than nothing
+	// Join the in-flight fetch instead of starting another.
+	if c.fetching != nil {
+		done := c.fetching
+		c.mu.Unlock()
+		select {
+		case <-done:
+		case <-ctx.Done():
 		}
-		return nil
+		c.mu.Lock()
+		m := c.mappings
+		c.mu.Unlock()
+		return m
 	}
-	c.mappings = m
-	c.fetched = time.Now()
-	return m
+	done := make(chan struct{})
+	c.fetching = done
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		if c.fetching == done {
+			c.fetching = nil
+		}
+		c.mu.Unlock()
+		close(done)
+	}()
+	return c.fetchAndStore(ctx, h)
+}
+
+// fetchAndStore performs the remote fetch (caller holds the fetch slot) and
+// updates the cache, keeping stale data on failure.
+func (c *mappingCache) fetchAndStore(ctx context.Context, h *httpClient) map[string]string {
+	m, err := fetchRemoteMappings(ctx, h.client)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err == nil && len(m) > 0 {
+		c.mappings = m
+		c.fetched = time.Now()
+	}
+	if len(c.mappings) > 0 {
+		return c.mappings // keep stale rather than nothing
+	}
+	return nil
 }
 
 // fetchRemoteMappings downloads the community provider-name mapping file.
@@ -102,13 +159,26 @@ func parseMappingLines(content string) map[string]string {
 }
 
 // mappingName looks up the provider name whose key appears in the URL.
+// Keys are walked in sorted order so the result is deterministic when
+// several keys match the same URL.
 func mappingName(mappings map[string]string, subURL string) string {
-	for key, name := range mappings {
+	name := ""
+	for _, key := range sortedKeys(mappings) {
 		if strings.Contains(subURL, key) {
-			return name
+			return mappings[key]
 		}
 	}
-	return ""
+	return name
+}
+
+// sortedKeys lists a map's keys in sorted order (deterministic iteration).
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // get fetches a URL with the given UA and returns status, headers and body.
@@ -141,6 +211,9 @@ type websiteInfo struct {
 func (p *SubinfoPlugin) getWebsiteInfo(ctx context.Context, subURL string) websiteInfo {
 	base := baseURLRe.FindString(subURL)
 	if base == "" {
+		return websiteInfo{}
+	}
+	if isPrivateHost(base) {
 		return websiteInfo{}
 	}
 	for _, path := range []string{base + "/auth/login", base} {
@@ -257,6 +330,10 @@ func contentDispositionName(cd string) string {
 // website title (in parallel), the subscription itself, then node parsing.
 func (p *SubinfoPlugin) processSubscription(ctx context.Context, subURL string) *subResult {
 	res := &subResult{url: subURL, configName: "未知", status: "失败"}
+	if isPrivateHost(subURL) {
+		res.errKind, res.errDetail = errOther, "private address rejected"
+		return res
+	}
 
 	var wg sync.WaitGroup
 	wg.Add(1)

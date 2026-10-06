@@ -441,10 +441,10 @@ func codeOrPlain(s string, txt bool) string {
 	return plugin.Code(s)
 }
 
-// rawOrLink renders a URL as a markdown link (message) or bare (txt).
+// rawOrLink renders a URL as a proper markdown link (message) or bare (txt).
 func rawOrLink(u string, txt bool) string {
 	if txt {
 		return u
 	}
-	return u
+	return plugin.Link(u, u)
 }

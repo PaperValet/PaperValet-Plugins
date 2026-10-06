@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -183,13 +182,22 @@ func (p *SubinfoPlugin) handle(ctx *plugin.CommandContext, brief bool) error {
 }
 
 // sendTxt writes text to a temp file and uploads it as a document.
+// os.CreateTemp picks an unpredictable name (a plain timestamp is guessable
+// and WriteFile would follow a pre-planted symlink).
 func (p *SubinfoPlugin) sendTxt(ctx *plugin.CommandContext, prefix, text, caption string) error {
-	name := fmt.Sprintf("%s_report_%s.txt", prefix, queryTime().Format("20060102_150405"))
-	path := filepath.Join(os.TempDir(), name)
-	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+	f, err := os.CreateTemp("", prefix+"_report_*.txt")
+	if err != nil {
 		return err
 	}
+	path := f.Name()
 	defer os.Remove(path)
+	if _, err := f.WriteString(text); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
 	return ctx.Media.SendFile(ctx.Context(), ctx.Message.ChatID, path, caption, 0)
 }
 
