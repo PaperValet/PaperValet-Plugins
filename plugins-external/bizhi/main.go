@@ -102,6 +102,7 @@ func (p *BizhiPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 		UsageEN:     "bizhi [meizi|dongman|fengjing|suiji] [-f] | bizhi help",
 		Plugin:      p.Name(),
 		Category:    "fun",
+		RateLimit:   20, // each run may download a 50MB wallpaper
 		Handler:     p.handleBizhi,
 	})
 }
@@ -428,7 +429,7 @@ func (p *BizhiPlugin) fromFallback(ctx context.Context, lx string) (*wallpaper, 
 	if data.Code != "200" || data.ImgURL == "" {
 		return nil, errors.New("fallback API returned no image")
 	}
-	name := "bizhi_" + safeName(firstNonEmpty(lx, "suiji")) + ".jpg"
+	name := "bizhi_" + safeName(firstNonEmpty(lx, "suiji")) + btstuExt(data.ImgURL)
 	path, size, err := p.download(ctx, data.ImgURL, name, "")
 	if err != nil {
 		return nil, err
@@ -457,6 +458,18 @@ func (p *BizhiPlugin) getJSON(ctx context.Context, u string, out any) error {
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	return json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(out)
+}
+
+// btstuExt infers the fallback image's extension from the imgurl path,
+// defaulting to .jpg (the document mime type derives from it via
+// mime.TypeByExtension, so a PNG saved as .jpg would lie about its type).
+func btstuExt(imgURL string) string {
+	if u, err := url.Parse(imgURL); err == nil {
+		if ext := strings.ToLower(filepath.Ext(u.Path)); ext != "" && len(ext) <= 5 {
+			return ext
+		}
+	}
+	return ".jpg"
 }
 
 // download streams rawURL into a unique temp file under data/bizhi/.

@@ -79,3 +79,19 @@ func TestCategoryChoices(t *testing.T) {
 		}
 	}
 }
+
+func TestBtstuExt(t *testing.T) {
+	cases := map[string]string{
+		"https://example.com/a/b/img.png":     ".png",
+		"https://example.com/img.JPG":         ".jpg",
+		"https://example.com/x.webp?q=1":      ".webp",
+		"https://example.com/noext":           ".jpg",
+		"https://example.com/":                ".jpg",
+		"https://example.com/.weirdext7/file": ".jpg", // too long → default
+	}
+	for in, want := range cases {
+		if got := btstuExt(in); got != want {
+			t.Errorf("btstuExt(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
