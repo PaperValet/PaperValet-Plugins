@@ -178,8 +178,12 @@ func (p *PMPlugin) reportSpam(ctx context.Context, id int64) {
 }
 
 // runFailActions runs on challenge failure: always archive + mute, then the
-// configured extra action.
+// configured extra action. Never against the owner's own chat, even if some
+// path managed to open a self challenge (defense in depth for cmdTest).
 func (p *PMPlugin) runFailActions(ctx context.Context, id int64) {
+	if p.host != nil && id != 0 && id == p.host.SelfID() {
+		return
+	}
 	p.archiveChat(ctx, id, 1)
 	p.muteChat(ctx, id, true)
 	switch p.options().failAction {
@@ -218,20 +222,43 @@ func (p *PMPlugin) logAction(action string, id int64, err error) {
 
 // beginChallenge mutes+archives a stranger and sends the challenge.
 func (p *PMPlugin) beginChallenge(ctx context.Context, userID int64) {
-	if p.hasChallenge(userID) {
+	if !p.options().captchaOn {
+		// No question to send: mute+archive only (idempotent), like the
+		// source. No challenge record is kept in this mode.
+		if p.hasChallenge(userID) {
+			return
+		}
+		p.muteChat(ctx, userID, true)
+		p.archiveChat(ctx, userID, 1)
+		return
+	}
+	// Atomically claim the slot BEFORE any network work: two near-simultaneous
+	// first messages from the same stranger used to both pass the hasChallenge
+	// check and run the whole flow twice (double mute/archive and question).
+	if !p.claimChallenge(userID) {
 		return
 	}
 	p.muteChat(ctx, userID, true)
 	p.archiveChat(ctx, userID, 1)
-	if !p.options().captchaOn {
-		return
-	}
 	p.sendChallenge(ctx, userID)
+}
+
+// claimChallenge reserves the challenge slot for userID with a placeholder
+// (empty answer) that the real challenge replaces once sent. It returns
+// false when a challenge or placeholder already exists.
+func (p *PMPlugin) claimChallenge(uid int64) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.challenges[uid]; ok {
+		return false
+	}
+	p.challenges[uid] = &challenge{started: time.Now()}
+	return true
 }
 
 // sendChallenge (re)sends a challenge to userID, replacing any old one.
 func (p *PMPlugin) sendChallenge(ctx context.Context, userID int64) {
-	if old := p.removeChallenge(userID); old != nil {
+	if old := p.removeChallenge(userID); old != nil && old.answer != "" {
 		p.deleteMsgs(ctx, userID, old.msgIDs)
 	}
 	o := p.options()
@@ -239,6 +266,9 @@ func (p *PMPlugin) sendChallenge(ctx context.Context, userID int64) {
 	text := challengeText(q.question, o, 0)
 	msgID, err := p.host.Send(ctx, userID, text, 0)
 	if err != nil {
+		// Release the placeholder claimed by beginChallenge so a later
+		// message can retry instead of leaving the user in limbo.
+		p.removeChallenge(userID)
 		if p.log != nil {
 			p.log.Warn("pmcaptcha: send challenge failed", "user", userID, "error", err)
 		}
@@ -305,6 +335,12 @@ func (p *PMPlugin) handleReply(ctx context.Context, userID int64, input string, 
 	p.mu.Lock()
 	ch := p.challenges[userID]
 	if ch == nil {
+		p.mu.Unlock()
+		return
+	}
+	if ch.answer == "" {
+		// Placeholder claimed by beginChallenge: the real question has not
+		// been sent (or just failed to send) — nothing to grade yet.
 		p.mu.Unlock()
 		return
 	}

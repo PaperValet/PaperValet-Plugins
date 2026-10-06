@@ -1,12 +1,18 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gotd/td/bin"
+	"github.com/gotd/td/tg"
+
+	"github.com/TiaraBasori/PaperValet/pkg/plugin"
 )
 
 // —— question generation ——
@@ -250,3 +256,90 @@ func TestFirstArg(t *testing.T) {
 		t.Fatal("firstArg")
 	}
 }
+
+// —— challenge slot claiming (double-message race) ——
+
+func TestClaimChallengeOnce(t *testing.T) {
+	p := New()
+	p.dir = t.TempDir() // finishPass persists records on success
+	p.host = newStubHost(0)
+	// First claim wins, second returns false: two near-simultaneous
+	// messages from the same stranger must not both start the flow.
+	if !p.claimChallenge(42) {
+		t.Fatal("first claim lost")
+	}
+	if p.claimChallenge(42) {
+		t.Fatal("second claim must fail")
+	}
+	// The placeholder is visible to hasChallenge so late arrivals take the
+	// reply path instead of re-beginning the flow…
+	if !p.hasChallenge(42) {
+		t.Fatal("placeholder not visible")
+	}
+	// …and grading against a placeholder is a no-op, not a wrong answer.
+	p.handleReply(context.Background(), 42, "5", 100)
+	if !p.hasChallenge(42) {
+		t.Fatal("placeholder dropped by handleReply")
+	}
+	// Releasing the placeholder (send failed) allows a retry.
+	p.removeChallenge(42)
+	if !p.claimChallenge(42) {
+		t.Fatal("claim after release failed")
+	}
+	// A real challenge replaces the placeholder and completes on answer.
+	p.setChallenge(42, &challenge{answer: "5", msgIDs: []int{1}, started: time.Now()})
+	p.handleReply(context.Background(), 42, "5", 101)
+	if p.hasChallenge(42) {
+		t.Fatal("answered challenge not completed")
+	}
+}
+
+func TestRunFailActionsSkipsSelf(t *testing.T) {
+	p := New()
+	// With a host whose SelfID matches, the actions are skipped entirely —
+	// verified by the stub below never making an API call.
+	h := newStubHost(7)
+	p.host = h
+	p.runFailActions(context.Background(), 7)
+	if h.calls != 0 {
+		t.Fatalf("fail actions ran against self: %d API calls", h.calls)
+	}
+	// A stranger is not skipped (the resolver is a stub, but the API call
+	// counter proves the actions were attempted).
+	p.runFailActions(context.Background(), 9)
+	if h.calls == 0 {
+		t.Fatal("fail actions were skipped for a stranger")
+	}
+}
+
+// stubHost counts the API entry points the fail/pass actions use. It hands
+// out a real *tg.Client backed by a no-op invoker so nil-client method calls
+// cannot panic the test.
+type stubHost struct {
+	plugin.Host
+	selfID int64
+	calls  int
+	api    *tg.Client
+}
+
+func newStubHost(self int64) *stubHost {
+	return &stubHost{selfID: self, api: tg.NewClient(stubInvoker{})}
+}
+
+func (h *stubHost) SelfID() int64   { return h.selfID }
+func (h *stubHost) API() *tg.Client { h.calls++; return h.api }
+
+// PeerResolver satisfies the Host interface: the flows under test never
+// resolve peers successfully, so it reports no resolver. peerOf then falls
+// back to its hash-0 path instead of panicking on a nil embedded interface.
+func (h *stubHost) PeerResolver() plugin.PeerResolver { return nil }
+
+func (h *stubHost) Send(_ context.Context, _ int64, _ string, _ int) (int, error) {
+	h.calls++
+	return 1, nil
+}
+
+// stubInvoker answers every RPC with success and no payload.
+type stubInvoker struct{}
+
+func (stubInvoker) Invoke(_ context.Context, _ bin.Encoder, _ bin.Decoder) error { return nil }

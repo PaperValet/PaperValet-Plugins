@@ -119,6 +119,16 @@ func (p *PMPlugin) cmdTest(ctx *plugin.CommandContext) error {
 		}
 		target = id
 	}
+	if target == ctx.SelfID {
+		// Challenging the owner can never be answered: the owner's own
+		// messages take the outbound fast path and never reach
+		// handleReply, so the challenge would time out and run the
+		// failure actions against the owner's own chat (mute+archive,
+		// and with fail_action=delete/report even delete-history or a
+		// self-report). Refuse self-targets outright.
+		return ctx.Edit("❌ " + tl("不能对自己发验证题（自己无法作答，超时会触发失败动作）",
+			"Cannot test on yourself: you can't answer, and timeout would run the fail actions on your own chat"))
+	}
 	p.removeChallenge(target)
 	p.sendChallenge(ctx.Context(), target)
 	if !p.hasChallenge(target) {
