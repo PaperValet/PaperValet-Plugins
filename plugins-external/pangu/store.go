@@ -32,6 +32,11 @@ type store struct {
 	mu   sync.Mutex
 	path string
 	cfg  panguConfig
+
+	// statsDirty marks unwritten stat counters; statsLastFlush backs the
+	// debounced write in recordFormatted.
+	statsDirty     bool
+	statsLastFlush time.Time
 }
 
 func newStore(dir string) (*store, error) {
@@ -238,13 +243,34 @@ func (s *store) effective(chatID int64) (on bool, why string) {
 	}
 }
 
-// ---- stats ----
+// statsFlushEvery bounds how long accumulated stats stay unwritten; the
+// config is otherwise written on every list/mode mutation (rare).
+const statsFlushEvery = time.Minute
 
+// recordFormatted counts one formatted message. The write is debounced:
+// the counters live in memory and are flushed at most once per minute (and
+// on Stop), so a busy chat does not rewrite config.json on every message.
 func (s *store) recordFormatted() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cfg.Stats.FormattedMessages++
 	s.cfg.Stats.LastFormatted = time.Now().UnixMilli()
+	if time.Since(s.statsLastFlush) < statsFlushEvery {
+		s.statsDirty = true // accumulate; flushed by the next window/Stop
+		return
+	}
+	s.statsLastFlush = time.Now()
+	_ = s.save()
+}
+
+// flushStats persists pending stats counters if any.
+func (s *store) flushStats() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.statsDirty {
+		return
+	}
+	s.statsDirty = false
 	_ = s.save()
 }
 

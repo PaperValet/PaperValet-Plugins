@@ -104,6 +104,7 @@ func (p *PanguPlugin) Stop(context.Context) error {
 		cancel()
 	}
 	p.wg.Wait()
+	p.store.flushStats() // persist debounced stats counters
 	return nil
 }
 
@@ -366,18 +367,35 @@ func (p *PanguPlugin) onMessage(_ context.Context, ev *plugin.MessageEvent, edit
 	if !p.autoEnabled() || !ev.IsOut {
 		return
 	}
+	if ev.Media != nil {
+		// Media captions are skipped: an album shares one caption, so
+		// editing it would re-space the whole media group.
+		return
+	}
 	text := ev.Text
 	if strings.TrimSpace(text) == "" {
 		return
 	}
+	if len(ev.Entities) > 0 {
+		// Entities (links, mentions, code) carry offsets into the old
+		// text; inserting spaces without shifting them would scramble
+		// the formatting, so leave formatted messages alone.
+		return
+	}
 	for _, pref := range p.host.Prefixes() {
-		if strings.HasPrefix(text, pref) {
+		if pref != "" && strings.HasPrefix(text, pref) {
 			return
 		}
 	}
 	if strings.HasPrefix(text, "/") {
 		return
 	}
+	p.formatAsync(ev, text)
+}
+
+// formatAsync applies the effective chat mode and performs the edit off the
+// update path. Split out of onMessage for testability.
+func (p *PanguPlugin) formatAsync(ev *plugin.MessageEvent, text string) {
 	on, _ := p.store.effective(ev.ChatID)
 	if !on {
 		return

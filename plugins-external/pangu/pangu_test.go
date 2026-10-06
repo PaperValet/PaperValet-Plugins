@@ -8,6 +8,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -490,5 +491,99 @@ func TestSpacingOracleCorpus(t *testing.T) {
 		if got := spacing(c.in); got != c.want {
 			t.Errorf("spacing(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// ---- listener gates ----
+
+// panguCandidate mirrors the listener's accept gate: own plain text messages
+// only — no edits, no media captions, no pre-formatted (entity-carrying)
+// text, no commands (empty prefixes must not match everything).
+func panguCandidate(edited, isOut, hasMedia bool, entities int, text string, prefixes []string) bool {
+	if edited || !isOut || hasMedia {
+		return false
+	}
+	if strings.TrimSpace(text) == "" {
+		return false
+	}
+	if entities > 0 {
+		return false
+	}
+	for _, pref := range prefixes {
+		if pref != "" && strings.HasPrefix(text, pref) {
+			return false
+		}
+	}
+	return !strings.HasPrefix(text, "/")
+}
+
+func TestPanguListenerGates(t *testing.T) {
+	prefixes := []string{"."}
+	cases := []struct {
+		name     string
+		edited   bool
+		isOut    bool
+		media    bool
+		entities int
+		text     string
+		want     bool
+	}{
+		{"plain own", false, true, false, 0, "你好x", true},
+		{"edited", true, true, false, 0, "你好x", false},
+		{"incoming", false, false, false, 0, "你好x", false},
+		{"media caption", false, true, true, 0, "看图", false},
+		{"has entities", false, true, false, 2, "你好x", false},
+		{"command dot", false, true, false, 0, ".ping", false},
+		{"command slash", false, true, false, 0, "/ping", false},
+		{"whitespace only", false, true, false, 0, "  \n", false},
+	}
+	for _, c := range cases {
+		if got := panguCandidate(c.edited, c.isOut, c.media, c.entities, c.text, prefixes); got != c.want {
+			t.Errorf("%s: candidate = %v, want %v", c.name, got, c.want)
+		}
+	}
+	// An empty prefix in the list must not turn every message into a command.
+	if !panguCandidate(false, true, false, 0, "hello", []string{""}) {
+		t.Error("empty prefix must not match")
+	}
+}
+
+// Stats writes are debounced: the first hit writes, hits inside the window
+// accumulate in memory, and flushStats persists what is pending.
+func TestStatsDebounce(t *testing.T) {
+	s, err := newStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.recordFormatted() // first hit: writes immediately
+	if s.statsDirty {
+		t.Fatal("first hit should leave nothing dirty (it wrote)")
+	}
+	s.recordFormatted()
+	s.recordFormatted()
+	if !s.statsDirty {
+		t.Fatal("hits inside the debounce window must stay dirty")
+	}
+	if got := s.cfg.Stats.FormattedMessages; got != 3 {
+		t.Fatalf("counter = %d, want 3", got)
+	}
+	s.flushStats()
+	if s.statsDirty {
+		t.Fatal("flushStats must clear the dirty flag")
+	}
+	// The persisted file must carry the full count after a flush.
+	s2, err := newStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2.cfg.Stats.FormattedMessages = 5
+	s2.statsDirty = true
+	s2.flushStats()
+	s3, err := newStore(filepath.Dir(s2.path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s3.cfg.Stats.FormattedMessages != 5 {
+		t.Fatalf("reloaded counter = %d, want 5", s3.cfg.Stats.FormattedMessages)
 	}
 }
