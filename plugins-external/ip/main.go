@@ -56,8 +56,10 @@ func (p *IPPlugin) Stop(context.Context) error  { return nil }
 
 func help(tl func(string, string) string) string {
 	return tl(
-		"📍 **IP 查询**\n\n"+plugin.Code("ip 8.8.8.8")+"\n"+plugin.Code("ip github.com")+"\n"+plugin.Code("ip 2001:4860:4860::8888")+"\n回复含 IP、域名或链接的消息发 "+plugin.Code("ip"),
-		"📍 **IP lookup**\n\n"+plugin.Code("ip 8.8.8.8")+"\n"+plugin.Code("ip github.com")+"\n"+plugin.Code("ip 2001:4860:4860::8888")+"\nOr reply "+plugin.Code("ip")+" to a message with an IP, domain or link")
+		"📍 **IP 查询**\n\n"+plugin.Code("ip 8.8.8.8")+"\n"+plugin.Code("ip github.com")+"\n"+plugin.Code("ip 2001:4860:4860::8888")+"\n回复含 IP、域名或链接的消息发 "+plugin.Code("ip")+
+			"\n\n💡 数据来自 ip-api 免费版，仅支持 http（HTTPS 为付费功能）",
+		"📍 **IP lookup**\n\n"+plugin.Code("ip 8.8.8.8")+"\n"+plugin.Code("ip github.com")+"\n"+plugin.Code("ip 2001:4860:4860::8888")+"\nOr reply "+plugin.Code("ip")+" to a message with an IP, domain or link"+
+			"\n\n💡 Data comes from the free ip-api tier, which is HTTP-only (HTTPS is a paid feature)")
 }
 
 func (p *IPPlugin) handle(ctx *plugin.CommandContext) error {

@@ -38,7 +38,7 @@ External plugins for [PaperValet](https://github.com/PaperValet/PaperValet) · [
 | gt | `gt` | 谷歌翻译 | Google Translate |
 | his | `his` | 查看某人在群里的发言记录 | List someone's recent messages in a group |
 | hitokoto | `hitokoto` | 随机一言 | Random quote |
-| ip | `ip` | 查询 IP 或域名的归属地 | Look up where an IP or domain lives |
+| ip | `ip` | 查询 IP 或域名的归属地（ip-api 免费版仅 http，HTTPS 为付费） | Look up where an IP or domain lives (free ip-api is HTTP-only; HTTPS is paid) |
 | keyword | `keyword` | 关键词自动回复，支持正则与冷却 | Auto-reply to keywords, regex and cooldowns |
 | listusernames | `listusernames` | 列出自己的公开群组和频道 | List your public groups and channels |
 | lottery | `lottery` | 群抽奖：报名、定时开奖 | Group lottery: join by keyword, scheduled draw |
