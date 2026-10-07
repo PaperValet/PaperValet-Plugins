@@ -25,9 +25,14 @@ const (
 	dataDir     = "data/speedtest"
 	cliVersion  = "1.2.0"
 	downloadURL = "https://install.speedtest.net/app/cli/"
-	runTimeout  = 120 * time.Second
 	listTimeout = 30 * time.Second
 	maxArchive  = 64 << 20
+
+	// runTimeout bounds one speed test; the panel's timeout setting
+	// (seconds) overrides it at run time.
+	defaultRunTimeout = 120 * time.Second
+	minRunTimeout     = 60 * time.Second
+	maxRunTimeout     = 300 * time.Second
 )
 
 func exeName() string {
@@ -473,7 +478,10 @@ const (
 	flavourPython
 )
 
-func runCLI(ctx context.Context, bin string, fl flavour, serverID int) (*Result, error) {
+func runCLI(ctx context.Context, bin string, fl flavour, serverID int, timeout time.Duration) (*Result, error) {
+	if timeout <= 0 {
+		timeout = defaultRunTimeout
+	}
 	var args []string
 	if fl == flavourPython {
 		args = []string{"--json", "--share", "--secure"}
@@ -486,7 +494,7 @@ func runCLI(ctx context.Context, bin string, fl flavour, serverID int) (*Result,
 			args = append(args, "-s", strconv.Itoa(serverID))
 		}
 	}
-	c, cancel := context.WithTimeout(ctx, runTimeout)
+	c, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := cliCommand(c, bin, args...)
 	var stdout, stderr bytes.Buffer
@@ -546,11 +554,12 @@ func findSystemCLI(ctx context.Context) (string, flavour, error) {
 // runSpeedtest runs a test. useSystem prefers an installed binary and
 // falls back to the bundled one; the bundled path installs/repairs itself
 // once and falls back to auto server selection when the server is gone.
-func runSpeedtest(ctx context.Context, serverID int, useSystem bool) (*Result, string, error) {
+// timeout bounds one CLI run (panel setting).
+func runSpeedtest(ctx context.Context, serverID int, useSystem bool, timeout time.Duration) (*Result, string, error) {
 	if useSystem {
 		bin, fl, err := findSystemCLI(ctx)
 		if err == nil {
-			res, err := runCLI(ctx, bin, fl, serverID)
+			res, err := runCLI(ctx, bin, fl, serverID, timeout)
 			if err == nil {
 				return res, "system", nil
 			}
@@ -572,7 +581,7 @@ func runSpeedtest(ctx context.Context, serverID int, useSystem bool) (*Result, s
 	}
 	fixed := false
 	for {
-		res, err := runCLI(ctx, cliPath(), flavourOokla, serverID)
+		res, err := runCLI(ctx, cliPath(), flavourOokla, serverID, timeout)
 		if err == nil {
 			return res, "bundled", nil
 		}

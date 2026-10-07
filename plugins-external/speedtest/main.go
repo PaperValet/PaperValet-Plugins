@@ -80,6 +80,12 @@ func (p *SpeedtestPlugin) Init(ctx context.Context, mgr plugin.Manager) error {
 					{Value: "txt", Label: "文本", LabelEN: "Text"},
 				},
 			},
+			{
+				Key: "timeout", Label: "单次测速超时（秒）", LabelEN: "Test timeout (seconds)",
+				Hint:   "高延迟链路可调大，60-300",
+				HintEN: "Raise it on high-latency links, 60-300",
+				Kind:   plugin.SettingNumber, Default: 120, Min: 60, Max: 300,
+			},
 		},
 	})
 	if err != nil {
@@ -147,6 +153,25 @@ func (p *SpeedtestPlugin) preferredType() msgType {
 	return msgType(p.set.String("type"))
 }
 
+// runTimeout reads the panel's per-test timeout, clamped to 60-300s.
+// Zero or malformed values fall back to the default.
+func (p *SpeedtestPlugin) runTimeout() time.Duration {
+	n := 0
+	if p.set != nil {
+		n = p.set.Int("timeout")
+	}
+	if n == 0 {
+		n = int(defaultRunTimeout / time.Second)
+	}
+	if n < int(minRunTimeout/time.Second) {
+		n = int(minRunTimeout / time.Second)
+	}
+	if n > int(maxRunTimeout/time.Second) {
+		n = int(maxRunTimeout / time.Second)
+	}
+	return time.Duration(n) * time.Second
+}
+
 // validServerID accepts an empty value or a positive integer.
 func validServerID(s string) (string, error) {
 	s = strings.TrimSpace(s)
@@ -199,7 +224,7 @@ func helpText(ctx *plugin.CommandContext) string {
 			"• `speedtest fix` — 自动修复 CLI 安装\n"+
 			"• `speedtest update` — 重新下载 Speedtest CLI\n\n"+
 			"**设置（机器人面板）**\n"+
-			"默认服务器、结果消息类型在机器人的 /menu 里调整\n\n"+
+			"默认服务器、结果消息类型、单次测速超时（默认 120 秒）在机器人的 /menu 里调整\n\n"+
 			"**系统 speedtest**\n"+
 			"添加 `--system` 或 `-s` 使用系统已安装的 speedtest（失败回退内置 CLI），例: `speedtest -s 12345`\n\n"+
 			"💡 CLI 自动下载到 data/speedtest/",
@@ -215,7 +240,7 @@ func helpText(ctx *plugin.CommandContext) string {
 			"• `speedtest fix` — repair the CLI install\n"+
 			"• `speedtest update` — re-download Speedtest CLI\n\n"+
 			"**Settings (bot panel)**\n"+
-			"Default server and result message type live in the bot's /menu\n\n"+
+			"Default server, result message type and the per-test timeout (default 120s) live in the bot's /menu\n\n"+
 			"**System speedtest**\n"+
 			"Add `--system` or `-s` to use an installed speedtest (falls back to the bundled CLI), e.g. `speedtest -s 12345`\n\n"+
 			"💡 The CLI is downloaded into data/speedtest/")
@@ -560,7 +585,7 @@ func (p *SpeedtestPlugin) cmdRun(c context.Context, ctx *plugin.CommandContext, 
 	}
 	_ = ctx.Edit(ctx.Tlocal("⚡️ 网络连接正常，正在进行速度测试...", "⚡️ Connection OK, running speed test..."))
 
-	res, source, err := runSpeedtest(c, serverID, useSystem)
+	res, source, err := runSpeedtest(c, serverID, useSystem, p.runTimeout())
 	if err != nil {
 		msg := err.Error()
 		hint := ""

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/tg"
 
@@ -182,6 +183,37 @@ func TestFillCorners(t *testing.T) {
 	}
 	if r, _, _, _ := out.At(20, 15).RGBA(); r>>8 != 0xff {
 		t.Error("centre lost")
+	}
+}
+
+type fakeSettings map[string]any
+
+func (f fakeSettings) Bool(k string) bool        { v, _ := f[k].(bool); return v }
+func (f fakeSettings) String(k string) string    { v, _ := f[k].(string); return v }
+func (f fakeSettings) Int(k string) int          { v, _ := f[k].(int); return v }
+func (f fakeSettings) Set(k string, v any) error { f[k] = v; return nil }
+
+func TestRunTimeout(t *testing.T) {
+	sec := func(n int) time.Duration { return time.Duration(n) * time.Second }
+	p := &SpeedtestPlugin{}
+	if d := p.runTimeout(); d != sec(120) {
+		t.Fatalf("no settings: got %v", d)
+	}
+	p.set = fakeSettings{}
+	if d := p.runTimeout(); d != sec(120) {
+		t.Fatalf("zero value: got %v", d)
+	}
+	for _, c := range []struct {
+		in   int
+		want int
+	}{
+		{60, 60}, {180, 180}, {300, 300},
+		{10, 60}, {9999, 300}, {-5, 60}, // clamped
+	} {
+		p.set = fakeSettings{"timeout": c.in}
+		if d := p.runTimeout(); d != sec(c.want) {
+			t.Fatalf("timeout=%d: got %v want %v", c.in, d, sec(c.want))
+		}
 	}
 }
 
