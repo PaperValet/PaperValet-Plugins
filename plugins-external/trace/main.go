@@ -235,12 +235,64 @@ func (p *TracePlugin) react(ctx context.Context, chatID int64, msgID int, reacti
 }
 
 func (p *TracePlugin) sendReaction(ctx context.Context, peer tg.InputPeerClass, msgID int, reactions []string) error {
-	req := &tg.MessagesSendReactionRequest{Peer: peer, MsgID: msgID, Reaction: toTG(reactions)}
-	if p.set == nil || p.set.Bool("big") {
-		req.SetBig(true)
+	send := func(list []string) error {
+		req := &tg.MessagesSendReactionRequest{Peer: peer, MsgID: msgID, Reaction: toTG(list)}
+		if p.set == nil || p.set.Bool("big") {
+			req.SetBig(true)
+		}
+		_, err := p.host.API().MessagesSendReaction(ctx, req)
+		return err
 	}
-	_, err := p.host.API().MessagesSendReaction(ctx, req)
-	return err
+	err := send(reactions)
+	if err == nil || countCustom(reactions) == 0 || !premiumRequired(err) {
+		return err
+	}
+	// Premium expired (or the custom emoji became unusable): downgrade to
+	// standard reactions and retry once instead of failing every message.
+	// Stored entries keep the custom emoji, so the original setup comes
+	// back once Premium is renewed.
+	fallback := mapToStandard(reactions, p.customAlts(ctx, reactions))
+	if len(fallback) == 0 {
+		return err
+	}
+	if ferr := send(fallback); ferr != nil {
+		return err
+	}
+	if p.log != nil {
+		p.log.Info("trace: custom emoji unavailable, downgraded to standard reactions",
+			"msg", msgID, "reactions", strings.Join(fallback, " "))
+	}
+	return nil
+}
+
+// customAlts returns a lookup of custom emoji document id (as stored, the
+// decimal id) to the emoji's own character, via
+// messages.getCustomEmojiDocuments. Unknown or failed lookups return "".
+func (p *TracePlugin) customAlts(ctx context.Context, reactions []string) func(string) string {
+	ids := make([]int64, 0, len(reactions))
+	for _, r := range reactions {
+		if id, err := strconv.ParseInt(r, 10, 64); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	alts := map[string]string{}
+	if len(ids) > 0 {
+		if docs, err := p.host.API().MessagesGetCustomEmojiDocuments(ctx, ids); err == nil {
+			for _, d := range docs {
+				doc, ok := d.(*tg.Document)
+				if !ok {
+					continue
+				}
+				for _, a := range doc.Attributes {
+					if ce, ok := a.(*tg.DocumentAttributeCustomEmoji); ok && ce.Alt != "" {
+						alts[strconv.FormatInt(doc.ID, 10)] = cleanEmoji(ce.Alt)
+						break
+					}
+				}
+			}
+		}
+	}
+	return func(id string) string { return alts[id] }
 }
 
 // isPremium reports (cached) whether the account has Telegram Premium.

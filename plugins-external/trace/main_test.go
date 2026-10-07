@@ -1,12 +1,14 @@
 package main
 
 import (
+	"errors"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 
 	"github.com/TiaraBasori/PaperValet/pkg/plugin"
 )
@@ -71,6 +73,42 @@ func TestToTG(t *testing.T) {
 	}
 	if c, ok := r[1].(*tg.ReactionCustomEmoji); !ok || c.DocumentID != 987 {
 		t.Fatalf("bad %T", r[1])
+	}
+}
+
+func TestPremiumRequired(t *testing.T) {
+	if !premiumRequired(tgerr.New(400, "PREMIUM_ACCOUNT_REQUIRED")) {
+		t.Fatal("premium required not detected")
+	}
+	if !premiumRequired(tgerr.New(400, "CUSTOM_EMOJI_INVALID")) {
+		t.Fatal("custom emoji invalid not detected")
+	}
+	if premiumRequired(tgerr.New(400, "REACTION_INVALID")) {
+		t.Fatal("reaction invalid misdetected")
+	}
+	if premiumRequired(errors.New("boom")) {
+		t.Fatal("plain error misdetected")
+	}
+}
+
+func TestMapToStandard(t *testing.T) {
+	alts := func(id string) string {
+		switch id {
+		case "111":
+			return "❤️" // variant selector must be cleaned
+		case "222":
+			return "🫠" // not a usable standard reaction → 👍
+		default:
+			return "" // lookup failed → 👍
+		}
+	}
+	got := mapToStandard([]string{"111", "👍", "222", "333", "111"}, alts)
+	if want := []string{"❤", "👍"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %q want %q", got, want)
+	}
+	// altOf nil (no lookup possible) still downgrades to 👍.
+	if got := mapToStandard([]string{"111"}, nil); !reflect.DeepEqual(got, []string{"👍"}) {
+		t.Fatalf("nil altOf: got %q", got)
 	}
 }
 

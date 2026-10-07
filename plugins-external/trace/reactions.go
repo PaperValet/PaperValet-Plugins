@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 )
 
 // standardReactions are the emoticons Telegram accepts as free reactions,
@@ -109,6 +110,49 @@ func parseReactions(text string, start int, ents []tg.MessageEntityClass, allowC
 		r, n := utf8.DecodeRuneInString(rest)
 		rest = rest[n:]
 		pos += utf16Len(string(r))
+	}
+	return out
+}
+
+// premiumRequired reports whether err is Telegram rejecting custom emoji
+// reactions for this account — Premium lapsed, or the custom emoji itself
+// is no longer usable.
+func premiumRequired(err error) bool {
+	e, ok := tgerr.As(err)
+	if !ok {
+		return false
+	}
+	return e.Type == "PREMIUM_ACCOUNT_REQUIRED" || e.Type == "CUSTOM_EMOJI_INVALID"
+}
+
+// mapToStandard replaces custom emoji ids with a usable standard reaction:
+// the emoji's own character when it is one Telegram accepts (alt carries
+// the native emoji the custom one was drawn from), else 👍. Standard
+// reactions pass through and duplicates are removed. altOf returns the
+// custom emoji's own character for a stored decimal document id.
+func mapToStandard(list []string, altOf func(string) string) []string {
+	out := make([]string, 0, len(list))
+	seen := map[string]bool{}
+	add := func(r string) {
+		if r != "" && !seen[r] {
+			seen[r] = true
+			out = append(out, r)
+		}
+	}
+	for _, r := range list {
+		if !isCustomID(r) {
+			add(r)
+			continue
+		}
+		alt := ""
+		if altOf != nil {
+			alt = altOf(r)
+		}
+		if matchStandard(alt) > 0 {
+			add(cleanEmoji(alt))
+		} else {
+			add("👍")
+		}
 	}
 	return out
 }
