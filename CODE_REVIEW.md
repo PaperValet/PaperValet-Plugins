@@ -464,7 +464,7 @@ SDK 依据：`/root/PaperValet/pkg/plugin/sdk.go`、`markdown.go`（Bold/Link �
 处置统计（185 条发现）：**fixed 165 · rejected 9（审查误报，验证后证伪）· deferred 13（需产品决策，逐条附理由）**
 
 - rejected 示例：bs sequence「首个失败也 break」实为审查误读（default 分支 continue，失败继续、成功即停，已补回归测试锁死）；bizhi `%2B` 编码问题实测证伪；music 「commands.go 无锁写」代码库无此文件
-- deferred 示例：trace premium 过期 custom emoji 自动剔除（改数据语义待定）、sticker DefaultPack 迁移、clean 保留统计策略等，明细见各域 status 文件
+- deferred 13 条已由用户逐条拍板（2026-10-06）：4 条实施（sticker DefaultPack 面板化、trace 过期 custom emoji 降级标准 emoji、ip help 注明 http 限制、speedtest runTimeout 面板化 60-300s），其余 9 条维持现状（忠实移植/收益低/owner 通道已隔离等，见各域 status 文件的「用户拍板」标注）
 - P0 全部修复：luxiaoxunbs 锁不平衡（abd8e46）、wordcloud TTC 越界（de485f7）、shift wlCache 无锁（1e59ff3 同批）、pmcaptcha self 目标（a63f6d6）、sendat DataDir（4e79b76）、checkin 并发窗口（91a4bf0）、teletype WaitGroup 代次计数
 - 论坛话题 ReplyToID 误判按 save 的 replyTarget 判定统一修复（trace/his/music/speedtest/crazy4 等）
 - 共性修复：Gemini key 改 x-goog-api-key 头（ai/xmsl）、第三方 API 命令补 OwnerOnly/RateLimit（ai/premium/ip/gt/duckduckgo/cosplay/bizhi/diss）、消息编辑类跳过媒体 caption 与带实体消息（textmode/pangu）、FLOOD_WAIT 分级重试上限
