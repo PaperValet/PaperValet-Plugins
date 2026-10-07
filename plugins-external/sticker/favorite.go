@@ -39,9 +39,7 @@ func (p *StickerPlugin) handleFavorite(ctx *plugin.CommandContext, s sub) error 
 
 	target := s.pack
 	if target == "" {
-		p.mu.Lock()
-		target = p.cfg.DefaultPack
-		p.mu.Unlock()
+		target = p.defaultPack()
 	}
 
 	me, err := meUser(ctx)
@@ -51,8 +49,8 @@ func (p *StickerPlugin) handleFavorite(ctx *plugin.CommandContext, s sub) error 
 	username := usernameOf(me)
 	if username == "" && target == "" {
 		return ctx.Edit("❌ " + ctx.Tlocal(
-			"您没有用户名，无法自动创建贴纸包。请先用 sticker <包名> 设置默认贴纸包",
-			"You have no username, packs cannot be auto-created. Set a default pack with sticker <pack> first"))
+			"您没有用户名，无法自动创建贴纸包。请在机器人面板的 sticker 设置里填写默认贴纸包",
+			"You have no username, packs cannot be auto-created. Set a default pack in the sticker panel of the bot"))
 	}
 
 	_ = ctx.Edit("🔄 " + ctx.Tlocal("正在查找贴纸包...", "Looking for the sticker pack..."))
@@ -325,47 +323,9 @@ func truncate(s string, n int) string {
 	return string(r[:n]) + "…"
 }
 
-// handleConfigPack implements "sticker <pack>" and "sticker cancel".
-func (p *StickerPlugin) handleConfigPack(ctx *plugin.CommandContext, s sub) error {
-	if s.kind == subCancel {
-		p.mu.Lock()
-		p.cfg.DefaultPack = ""
-		cfg := p.cfg
-		p.mu.Unlock()
-		if err := saveConfig(p.cfgPath, cfg); err != nil {
-			return ctx.Edit("❌ " + ctx.Tlocal("保存失败", "Save failed") + ": " + plugin.Escape(err.Error()))
-		}
-		return ctx.Edit("✅ " + ctx.Tlocal("已取消默认贴纸包", "Default sticker pack cleared"))
-	}
-	pack := s.pack
-	if !validPackName(pack) {
-		return ctx.Edit("❌ " + ctx.Tlocal(
-			"贴纸包名只能包含字母、数字和下划线，且必须以字母开头",
-			"Pack names may only contain letters, digits and underscores, starting with a letter"))
-	}
-	_ = ctx.Edit("🔄 " + ctx.Tlocal("正在验证贴纸包", "Validating sticker pack") + " " + plugin.Code(pack) + "...")
-	if _, exists, err := lookupSet(ctx, pack); err != nil {
-		return tgErrText(ctx, err)
-	} else if !exists {
-		return ctx.Edit("❌ " + ctx.Tlocal(
-			"无法访问贴纸包，请确保它存在且您有权访问",
-			"Cannot access the sticker pack; make sure it exists and you can access it"))
-	}
-	p.mu.Lock()
-	p.cfg.DefaultPack = pack
-	cfg := p.cfg
-	p.mu.Unlock()
-	if err := saveConfig(p.cfgPath, cfg); err != nil {
-		return ctx.Edit("❌ " + ctx.Tlocal("保存失败", "Save failed") + ": " + plugin.Escape(err.Error()))
-	}
-	return ctx.Edit("✅ " + ctx.Tlocal("默认贴纸包已设置为", "Default sticker pack set to") + " " + plugin.Code(pack))
-}
-
 // handleStatus implements "sticker" with no sticker reply and "sticker status".
 func (p *StickerPlugin) handleStatus(ctx *plugin.CommandContext) error {
-	p.mu.Lock()
-	pack := p.cfg.DefaultPack
-	p.mu.Unlock()
+	pack := p.defaultPack()
 	var b strings.Builder
 	b.WriteString("🧩 **" + ctx.Tlocal("贴纸收藏设置", "Sticker favorite settings") + "**\n\n")
 	if pack != "" {
@@ -374,11 +334,11 @@ func (p *StickerPlugin) handleStatus(ctx *plugin.CommandContext) error {
 		if u := usernameOf(me); u != "" {
 			b.WriteString(ctx.Tlocal("未设置默认贴纸包，将自动使用", "No default pack set; auto packs") + " " + plugin.Code(u+"_...") + "\n")
 		} else {
-			b.WriteString("❌ " + ctx.Tlocal("未设置默认贴纸包，且您没有用户名，收藏前必须先设置一个默认包", "No default pack and no username: set a default pack before favoriting") + "\n")
+			b.WriteString("❌ " + ctx.Tlocal("未设置默认贴纸包，且您没有用户名，收藏前必须在面板里设置一个默认包", "No default pack and no username: set a default pack in the panel before favoriting") + "\n")
 		}
 	} else {
 		b.WriteString(ctx.Tlocal("未设置默认贴纸包", "No default pack set") + "\n")
 	}
-	b.WriteString("\n" + ctx.Tlocal("转换设置（表情/边长/质量/背景）在机器人面板里调整", "Conversion settings (emoji/size/quality/background) live in the bot panel"))
+	b.WriteString("\n" + ctx.Tlocal("默认贴纸包与转换设置（表情/边长/质量/背景）在机器人面板里调整", "Default pack and conversion settings (emoji/size/quality/background) live in the bot panel"))
 	return ctx.Edit(b.String())
 }

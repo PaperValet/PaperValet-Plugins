@@ -59,7 +59,7 @@ External plugins for [PaperValet](https://github.com/PaperValet/PaperValet) · [
 | setu | `setu` | 通过 FinelyGirls 机器人获取二次元图片，带剧透与签到 | Anime images via the FinelyGirls bot, spoiler-wrapped, with daily check-in |
 | shift | `shift` | 批量转移消息到指定对话 | Move messages to another chat |
 | speedtest | `speedtest` · `st` | Ookla 网速测试 | Speedtest by Ookla |
-| sticker | `sticker` | 贴纸包管理、图转贴纸、贴纸转图 | Sticker pack management, photo→sticker, sticker→photo |
+| sticker | `sticker` | 贴纸收藏、图转贴纸、贴纸转图 | Favorite stickers into packs, photo→sticker, sticker→photo |
 | subinfo | `subinfo` · `cha` | 查询机场订阅流量与节点信息 | Query proxy subscription traffic and node info |
 | teletype | `teletype` | 打字机效果：逐字打出文本（带光标），可自动加到自己消息上 | Typewriter effect: retype text char by char (with cursor), auto mode for own messages |
 | textmode | `textmode` | 自动给自己发的消息加格式（粗体/下划线/遮罩等） | Auto-format your own messages (bold/underline/spoiler…) |

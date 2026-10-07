@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
@@ -31,23 +30,11 @@ var tmpDirRoot = "data/sticker/tmp"
 var baseEmojis = []string{"😀", "😁", "😂", "🤣", "😊", "😇", "🙂", "😉", "😋", "😎", "😍", "😘", "😜", "🤗", "🤔", "😴", "😌", "😅", "😆", "😄"}
 
 type StickerPlugin struct {
-	host    plugin.Host
-	set     plugin.Settings
-	cfgPath string
-
-	mu  sync.Mutex
-	cfg config
-
-	stopped bool
-	wg      sync.WaitGroup
+	host plugin.Host
+	set  plugin.Settings
 }
 
-func New() *StickerPlugin {
-	return &StickerPlugin{
-		cfgPath: "data/sticker/config.json",
-		cfg:     defaultConfig(),
-	}
-}
+func New() *StickerPlugin { return &StickerPlugin{} }
 
 var Metadata = &plugin.PluginMetadata{
 	Name:        "sticker",
@@ -66,16 +53,12 @@ func (p *StickerPlugin) Init(_ context.Context, mgr plugin.Manager) error {
 	p.host = mgr.Host()
 	if p.host != nil {
 		if dir, err := p.host.DataDir("sticker"); err == nil && dir != "" {
-			p.cfgPath = filepath.Join(dir, "config.json")
 			tmpDirRoot = filepath.Join(dir, "tmp")
 			_ = os.MkdirAll(tmpDirRoot, 0o755)
 		}
 	}
-	p.mu.Lock()
-	p.cfg = loadConfig(p.cfgPath)
-	p.mu.Unlock()
 
-	set, err := mgr.Host().Settings(&plugin.SettingsSpec{
+	set, err := p.host.Settings(&plugin.SettingsSpec{
 		Plugin:  "sticker",
 		Title:   "🧩 贴纸",
 		TitleEN: "🧩 Sticker",
@@ -104,19 +87,39 @@ func (p *StickerPlugin) Init(_ context.Context, mgr plugin.Manager) error {
 					{Value: "white", Label: "白色", LabelEN: "White"},
 					{Value: "black", Label: "黑色", LabelEN: "Black"},
 				}},
+			{Key: "pack", Label: "默认贴纸包", LabelEN: "Default sticker pack",
+				Hint:   "收藏贴纸的目标包 shortName，留空自动用 用户名_static/_animated/_video；保存时验证包存在",
+				HintEN: "Target pack shortName for favoriting; empty auto-uses username_static/_animated/_video; validated on save",
+				Kind:   plugin.SettingText, Default: "",
+				Validate: func(s string) (string, error) {
+					s = strings.TrimSpace(s)
+					if s == "" {
+						return "", nil // empty = auto packs
+					}
+					if !validPackName(s) {
+						return "", plugin.Invalid(
+							"贴纸包名只能包含字母、数字和下划线，且必须以字母开头",
+							"Pack names may only contain letters, digits and underscores, starting with a letter")
+					}
+					if err := p.validatePackExists(s); err != nil {
+						return "", err
+					}
+					return s, nil
+				}},
 		},
 	})
 	if err != nil {
 		return err
 	}
 	p.set = set
+	p.migrateLegacyConfig()
 
 	return mgr.RegisterCommand(&plugin.Command{
 		Name:        "sticker",
 		Description: "收藏贴纸到贴纸包；图转贴纸；贴纸转图片",
 		DescEN:      "Favorite stickers into packs; photo→sticker; sticker→photo",
-		Usage:       "sticker（回复贴纸收藏）· sticker to <包名> · sticker <包名>/cancel · sticker pic [表情|batch]（回复图片）· sticker topng [doc|png]（回复贴纸）",
-		UsageEN:     "sticker (reply to favorite) · sticker to <pack> · sticker <pack>/cancel · sticker pic [emoji|batch] (reply photo) · sticker topng [doc|png] (reply sticker)",
+		Usage:       "sticker（回复贴纸收藏）· sticker to <包名> · sticker pic [表情|batch]（回复图片）· sticker topng [doc|png]（回复贴纸）",
+		UsageEN:     "sticker (reply to favorite) · sticker to <pack> · sticker pic [emoji|batch] (reply photo) · sticker topng [doc|png] (reply sticker)",
 		Plugin:      "sticker",
 		Category:    "tools",
 		Handler:     p.handle,
@@ -124,24 +127,75 @@ func (p *StickerPlugin) Init(_ context.Context, mgr plugin.Manager) error {
 }
 
 func (p *StickerPlugin) Start(_ context.Context) error {
-	p.mu.Lock()
-	p.stopped = false
-	p.mu.Unlock()
 	_ = os.MkdirAll(tmpDirRoot, 0o755)
 	return nil
 }
 
-func (p *StickerPlugin) Stop(ctx context.Context) error {
-	p.mu.Lock()
-	p.stopped = true
-	p.mu.Unlock()
-	done := make(chan struct{})
-	go func() { p.wg.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-ctx.Done():
+func (p *StickerPlugin) Stop(context.Context) error { return nil }
+
+// ---------------------------------------------------------------- settings
+
+// validatePackExists checks with the Telegram API that a pack short name is
+// reachable, for the settings panel's Validate. Offline (no client yet) the
+// syntax check above is the best available and favorite re-checks anyway.
+func (p *StickerPlugin) validatePackExists(pack string) error {
+	if p.host == nil {
+		return nil
+	}
+	api := p.host.API()
+	if api == nil {
+		return nil
+	}
+	_, err := api.MessagesGetStickerSet(context.Background(), &tg.MessagesGetStickerSetRequest{
+		Stickerset: &tg.InputStickerSetShortName{ShortName: pack},
+		Hash:       0,
+	})
+	if err != nil {
+		if tgerr.Is(err, "STICKERSET_INVALID") {
+			return plugin.Invalid(
+				fmt.Sprintf("无法访问贴纸包 %s，请确保它存在且您有权访问", pack),
+				fmt.Sprintf("Cannot access sticker pack %s; make sure it exists and you can access it", pack))
+		}
+		if _, ok := tgerr.AsFloodWait(err); ok {
+			return plugin.Invalid("请求过于频繁，请稍后重试", "Too many requests, try again later")
+		}
+		return nil // transient network issues must not block saving
 	}
 	return nil
+}
+
+// defaultPack reads the default pack from the settings panel.
+func (p *StickerPlugin) defaultPack() string {
+	if p.set == nil {
+		return ""
+	}
+	return strings.TrimSpace(p.set.String("pack"))
+}
+
+// migrateLegacyConfig moves a legacy config.json DefaultPack into the
+// settings panel (pack key) once, when the panel value was never set; the
+// legacy file is removed afterwards.
+func (p *StickerPlugin) migrateLegacyConfig() {
+	if p.host == nil || p.set == nil {
+		return
+	}
+	if dir, err := p.host.DataDir("sticker"); err == nil && dir != "" {
+		migrateLegacyPack(filepath.Join(dir, "config.json"), p.set)
+	}
+}
+
+// migrateLegacyPack carries a legacy DefaultPack into the panel: fill it in
+// when the panel value was never set, then remove the legacy file either
+// way. Old configs with an empty DefaultPack are just dropped.
+func migrateLegacyPack(path string, set plugin.Settings) {
+	if set == nil {
+		return
+	}
+	cfg := loadConfig(path)
+	if cfg.DefaultPack != "" && strings.TrimSpace(set.String("pack")) == "" {
+		_ = set.Set("pack", cfg.DefaultPack)
+	}
+	_ = os.Remove(path)
 }
 
 // ---------------------------------------------------------------- dispatch
@@ -159,7 +213,7 @@ func (p *StickerPlugin) handle(ctx *plugin.CommandContext) error {
 		return ctx.Edit("❌ " + ctx.Tlocal("未知子命令", "Unknown subcommand") + " " + plugin.Code(sub.unknown) + "\n\n" + helpText(ctx))
 	}
 	switch sub.kind {
-	case subFav, subFavTo, subPack:
+	case subFav, subFavTo:
 		// Reply to a sticker → favorite (a bare pack arg doubles as the
 		// target pack, more useful than the source's silent ignore).
 		if reply, err := ctx.ReplyMessage(); err == nil && reply != nil && isStickerMsg(reply) {
@@ -168,12 +222,7 @@ func (p *StickerPlugin) handle(ctx *plugin.CommandContext) error {
 		if sub.kind == subFavTo {
 			return ctx.Edit("❌ " + ctx.Tlocal("请回复一个贴纸消息", "Reply to a sticker message"))
 		}
-		if sub.kind == subPack {
-			return p.handleConfigPack(ctx, sub)
-		}
 		return p.handleFavorite(ctx, sub)
-	case subCancel:
-		return p.handleConfigPack(ctx, sub)
 	case subStatus:
 		return p.handleStatus(ctx)
 	case subPic, subPicBatch:

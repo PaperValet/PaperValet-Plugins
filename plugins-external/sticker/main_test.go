@@ -27,9 +27,9 @@ func TestParseSub(t *testing.T) {
 		{[]string{"h"}, subHelp, ""},
 		{[]string{"to", "MyPack"}, subFavTo, "MyPack"},
 		{[]string{"to"}, subUnknown, ""},
-		{[]string{"cancel"}, subCancel, ""},
+		{[]string{"cancel"}, subUnknown, ""},
 		{[]string{"status"}, subStatus, ""},
-		{[]string{"MyPack"}, subPack, "MyPack"},
+		{[]string{"MyPack"}, subUnknown, ""},
 		{[]string{"pic"}, subPic, ""},
 		{[]string{"pic", "😎"}, subPic, ""},
 		{[]string{"pic", "batch"}, subPicBatch, ""},
@@ -250,33 +250,105 @@ func TestFfmpegToPicArgs(t *testing.T) {
 	}
 }
 
-func TestConfigRoundTrip(t *testing.T) {
+func TestLoadLegacyConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	if got := loadConfig(path); got != (config{}) {
-		t.Errorf("missing file should give defaults, got %+v", got)
+	if got := loadConfig(path); got != (legacyConfig{}) {
+		t.Errorf("missing file should give empty config, got %+v", got)
 	}
-	cfg := config{DefaultPack: "my_pack"}
-	if err := saveConfig(path, cfg); err != nil {
-		t.Fatalf("saveConfig: %v", err)
-	}
-	if got := loadConfig(path); got != cfg {
-		t.Errorf("round trip = %+v, want %+v", got, cfg)
-	}
-	// mode 0600
-	st, err := os.Stat(path)
-	if err != nil {
+	if err := os.WriteFile(path, []byte(`{"default_pack":"my_pack"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if st.Mode().Perm() != 0o600 {
-		t.Errorf("config mode = %v, want 0600", st.Mode().Perm())
+	if got := loadConfig(path); got.DefaultPack != "my_pack" {
+		t.Errorf("loadConfig = %+v, want default_pack my_pack", got)
 	}
-	// corrupt file → defaults, no error
+	// corrupt file → empty, no error
 	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := loadConfig(path); got != (config{}) {
-		t.Errorf("corrupt file should give defaults, got %+v", got)
+	if got := loadConfig(path); got != (legacyConfig{}) {
+		t.Errorf("corrupt file should give empty config, got %+v", got)
+	}
+}
+
+// fakeSettings is a minimal plugin.Settings for migration tests.
+type fakeSettings struct {
+	m map[string]any
+}
+
+func (f *fakeSettings) Bool(string) bool { return false }
+func (f *fakeSettings) Int(string) int   { return 0 }
+func (f *fakeSettings) String(k string) string {
+	s, _ := f.m[k].(string)
+	return s
+}
+func (f *fakeSettings) Set(k string, v any) error {
+	if f.m == nil {
+		f.m = map[string]any{}
+	}
+	f.m[k] = v
+	return nil
+}
+
+func TestMigrateLegacyPack(t *testing.T) {
+	write := func(dir, body string) string {
+		path := filepath.Join(dir, "config.json")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	// legacy value fills the empty panel, file removed
+	dir := t.TempDir()
+	path := write(dir, `{"default_pack":"my_pack"}`)
+	set := &fakeSettings{}
+	migrateLegacyPack(path, set)
+	if set.m["pack"] != "my_pack" {
+		t.Errorf("pack = %v, want my_pack", set.m["pack"])
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("legacy config.json should be removed")
+	}
+
+	// panel already set → legacy value does not win, file removed
+	dir = t.TempDir()
+	path = write(dir, `{"default_pack":"old_pack"}`)
+	set = &fakeSettings{m: map[string]any{"pack": "new_pack"}}
+	migrateLegacyPack(path, set)
+	if set.m["pack"] != "new_pack" {
+		t.Errorf("pack = %v, want new_pack (panel value must win)", set.m["pack"])
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("legacy config.json should be removed")
+	}
+
+	// empty legacy value → nothing carried over, file removed
+	dir = t.TempDir()
+	path = write(dir, `{"default_pack":""}`)
+	set = &fakeSettings{}
+	migrateLegacyPack(path, set)
+	if _, ok := set.m["pack"]; ok {
+		t.Errorf("pack should stay unset, got %v", set.m["pack"])
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("legacy config.json should be removed")
+	}
+
+	// no legacy file at all → no-op
+	set = &fakeSettings{}
+	migrateLegacyPack(filepath.Join(t.TempDir(), "config.json"), set)
+	if len(set.m) != 0 {
+		t.Errorf("no file should change nothing, got %v", set.m)
+	}
+}
+
+// TestValidatePackExistsNoAPI proves validatePackExists skips the API check
+// when no host/client is available (syntax-only validation in that case).
+func TestValidatePackExistsNoAPI(t *testing.T) {
+	p := &StickerPlugin{} // no host
+	if err := p.validatePackExists("whatever"); err != nil {
+		t.Errorf("no host should pass through, got %v", err)
 	}
 }
 
@@ -285,9 +357,14 @@ func TestHelpText(t *testing.T) {
 	// minimal context and contains the subcommands.
 	ctx := pluginCtx()
 	h := helpText(&ctx)
-	for _, want := range []string{"sticker", "topng", "cancel", "batch"} {
+	for _, want := range []string{"sticker", "topng", "status", "batch"} {
 		if !strings.Contains(h, want) {
 			t.Errorf("help missing %q", want)
+		}
+	}
+	for _, gone := range []string{"cancel", "设置默认贴纸包", "set the default pack"} {
+		if strings.Contains(h, gone) {
+			t.Errorf("help should no longer mention %q", gone)
 		}
 	}
 }
