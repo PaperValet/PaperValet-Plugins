@@ -215,6 +215,53 @@ func TestRunBridgeNodeMissing(t *testing.T) {
 	}
 }
 
+func TestBridgeErrMsg(t *testing.T) {
+	// the FATAL one-liner beats any stack frame
+	stderr := "[quote-bridge] first run: downloading quote-api vendor + assets (33 files)…\n" +
+		"[quote-bridge] assets ready\n" +
+		"[quote-bridge] FATAL TypeError [ERR_INVALID_ARG_VALUE]: The argument 'filename' must be an absolute path. Received 'data/quote/vendor-src/generate.js'\n" +
+		"    at createRequire (node:internal/modules/cjs/loader:2039:13)\n" +
+		"    at main (file:///root/.pvtest/data/quote/bridge.mjs:166:25)\n"
+	want := "[quote-bridge] FATAL TypeError [ERR_INVALID_ARG_VALUE]: The argument 'filename' must be an absolute path. Received 'data/quote/vendor-src/generate.js'"
+	if got := bridgeErrMsg(stderr); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	// no FATAL: fall back to the last non-empty line
+	if got := bridgeErrMsg("warn\nError: boom\n    at foo (bar.js:1:1)\n\n"); got != "at foo (bar.js:1:1)" {
+		t.Errorf("fallback got %q", got)
+	}
+	if got := bridgeErrMsg("   \n"); got != "" {
+		t.Errorf("empty stderr got %q", got)
+	}
+	// over-long FATAL line is clipped on a rune boundary
+	if got := bridgeErrMsg(fatalMark + " " + strings.Repeat("喵", 500)); len([]rune(got)) != 400 {
+		t.Errorf("clip got %d runes, want 400", len([]rune(got)))
+	}
+}
+
+func TestAbsDataDir(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// a relative DataDir (what the host returns) must resolve against this
+	// process's cwd — otherwise the node child re-resolves it against its
+	// own cwd and nests data/quote/data/quote.
+	host := stubHost{dir: filepath.Join("data", "quote")}
+	if got, want := absDataDir(host), filepath.Join(cwd, "data", "quote"); got != want {
+		t.Errorf("absDataDir = %q, want %q", got, want)
+	}
+	// absolute values pass through untouched
+	host.dir = "/var/lib/quote"
+	if got := absDataDir(host); got != "/var/lib/quote" {
+		t.Errorf("absolute pass-through = %q", got)
+	}
+}
+
+type stubHost struct{ dir string }
+
+func (h stubHost) DataDir(string) (string, error) { return h.dir, nil }
+
 func TestEnsureBridgeFile(t *testing.T) {
 	dir := t.TempDir()
 	p, err := ensureBridgeFile(dir)
@@ -232,6 +279,9 @@ func TestEnsureBridgeFile(t *testing.T) {
 	}
 	if !strings.Contains(bridgeSource, "raw.githubusercontent.com/LyoSU/quote-api") {
 		t.Error("bridgeSource must pull official quote-api assets")
+	}
+	if !strings.Contains(bridgeSource, "path.resolve(req.assetsDir") {
+		t.Error("bridgeSource must absolutize the assets dir (a relative value nests)")
 	}
 	// second call is a no-op rewrite with identical content
 	if _, err := ensureBridgeFile(dir); err != nil {
@@ -455,6 +505,27 @@ func TestBridgeE2E(t *testing.T) {
 		t.Errorf("frame ext %q but bytes sniff as %q", res.Ext, got)
 	}
 	t.Logf("rendered %d bytes %s", len(res.Data), res.Ext)
+
+	// regression: a relative assets dir used to be re-resolved against the
+	// node child's own cwd (nesting data/quote/data/quote) and crash
+	// createRequire with a relative vendor script path. It must render the
+	// same assets dir as the absolute run above.
+	t.Chdir(filepath.Dir(dir))
+	res, err = runBridge(t.Context(), nil, &bridgeRequest{
+		Messages:        []json.RawMessage{raw},
+		Type:            "quote",
+		Format:          "webp",
+		Scale:           2,
+		BackgroundColor: defaultBackground,
+		EmojiBrand:      "apple",
+		AssetsDir:       "assets",
+	})
+	if err != nil {
+		t.Fatalf("runBridge with relative assets dir: %v", err)
+	}
+	if len(res.Data) < 1000 {
+		t.Fatalf("relative-dir render too small: %d bytes", len(res.Data))
+	}
 }
 
 // genAvatarPNG draws a small red/blue square avatar in memory.

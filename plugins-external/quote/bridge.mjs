@@ -88,7 +88,9 @@ async function downloadIfMissing(url, filePath) {
 }
 
 async function ensureAssets(dir) {
-  const vendorDir = path.join(dir, "vendor-src");
+  // absolute: createRequire (used for the vendor entry point) rejects
+  // relative script paths outright
+  const vendorDir = path.resolve(path.join(dir, "vendor-src"));
   const ready = path.join(dir, ".ready");
   if (fs.existsSync(ready)) return vendorDir;
   log(`[quote-bridge] first run: downloading quote-api vendor + assets (${VENDOR_FILES.length + ASSET_FILES.length + FONT_FILES.length} files)…`);
@@ -114,7 +116,10 @@ async function ensureAssets(dir) {
 
 function ensureNpmDeps(dir) {
   const nm = path.join(dir, "node_modules");
-  const missing = NPM_DEPS.filter((dep) => !fs.existsSync(path.join(nm, dep)));
+  // the dep list may carry version tags (lru-cache@7) — the installed dir
+  // name never has one, so check the bare package name
+  const pkgName = (dep) => (dep.startsWith("@") ? dep : dep.split("@")[0]);
+  const missing = NPM_DEPS.filter((dep) => !fs.existsSync(path.join(nm, pkgName(dep))));
   if (missing.length === 0) return;
   log(`[quote-bridge] npm install ${missing.join(" ")} …`);
   const pkgPath = path.join(dir, "package.json");
@@ -153,7 +158,10 @@ function decodeBase64Images(messages) {
 
 async function main() {
   const req = readStdinJson();
-  const dir = req.assetsDir || process.cwd();
+  // Always absolute: a relative assetsDir would resolve against this
+  // process's cwd (the data dir the Go side picked), and every later
+  // relative join would nest data/quote/data/quote/… on each hop.
+  const dir = path.resolve(req.assetsDir || process.cwd());
   fs.mkdirSync(dir, { recursive: true });
   // The vendor resolves pattern/fonts/icons from process.cwd()/assets[/quote]
   // (same layout TeleBox uses). chdir so this holds however node was spawned.

@@ -25,6 +25,7 @@ const (
 	bridgeMagic    = "PVQT" // frame magic
 	bridgeHeaderSz = 16     // magic(4) + payloadLen(4) + extCode(4) + reserved(4)
 	bridgeTimeout  = 180 * time.Second
+	fatalMark      = "[quote-bridge] FATAL"
 
 	extCodePNG  = 1
 	extCodeWebP = 2
@@ -167,15 +168,20 @@ func runBridge(ctx context.Context, host bridgeHost, req *bridgeRequest) (*bridg
 	if node == "" {
 		return nil, errors.New("node not found — quote 渲染需要 Node.js (node)")
 	}
-	dir := dataDirOf(host)
+	// The data dir is a relative path ("data/quote"); resolve it once here.
+	// Handing a relative value to the node child would make it re-resolve
+	// against its own cwd, nesting data/quote/data/quote/… and crashing
+	// createRequire, which demands an absolute script path.
+	dir := absDataDir(host)
 	script, err := ensureBridgeFile(dir)
 	if err != nil {
 		return nil, fmt.Errorf("prepare bridge: %w", err)
 	}
-	// cmd.Dir changes the process cwd — the script argument must be absolute
-	// or node resolves it relative to the new cwd.
-	if script, err = filepath.Abs(script); err != nil {
-		return nil, err
+	// same story for the request's asset dir: the bridge chdirs into it
+	if req.AssetsDir == "" {
+		req.AssetsDir = dir
+	} else {
+		req.AssetsDir = absOr(req.AssetsDir)
 	}
 
 	payload, err := json.Marshal(req)
@@ -192,17 +198,9 @@ func runBridge(ctx context.Context, host bridgeHost, req *bridgeRequest) (*bridg
 	cmd.Stderr = &stderrBuf
 	out, err := cmd.Output()
 	if err != nil {
-		msg := strings.TrimSpace(stderrBuf.String())
+		msg := bridgeErrMsg(stderrBuf.String())
 		if msg == "" {
 			msg = err.Error()
-		}
-		// surface the tail of the stderr (most informative part),
-		// cut on rune boundaries so multibyte text stays valid UTF-8
-		if r := []rune(msg); len(r) > 400 {
-			msg = string(r[len(r)-400:])
-		}
-		if i := strings.LastIndexByte(msg, '\n'); i >= 0 && i+1 < len(msg) {
-			msg = msg[i+1:]
 		}
 		if c.Err() == context.DeadlineExceeded {
 			return nil, fmt.Errorf("bridge timeout after %s (first run downloads assets; retry): %s", bridgeTimeout, msg)
@@ -210,6 +208,59 @@ func runBridge(ctx context.Context, host bridgeHost, req *bridgeRequest) (*bridg
 		return nil, fmt.Errorf("bridge: %s", msg)
 	}
 	return parseBridgeFrame(out)
+}
+
+// absDataDir returns the plugin data dir as an absolute path. The host
+// hands out relative paths ("data/quote") that only make sense against
+// this process's cwd; the node child must not re-resolve them.
+func absDataDir(host bridgeHost) string {
+	return absOr(dataDirOf(host))
+}
+
+// absOr makes p absolute against the current working directory when it is
+// relative; unresolvable paths are returned unchanged.
+func absOr(p string) string {
+	if filepath.IsAbs(p) {
+		return p
+	}
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return p
+}
+
+// bridgeErrMsg picks the most informative line out of the bridge's stderr.
+// The bridge prints a one-line "[quote-bridge] FATAL <err>" summary before
+// the stack — prefer it over the last (near-useless) stack frame.
+func bridgeErrMsg(stderr string) string {
+	msg := strings.TrimSpace(stderr)
+	if msg == "" {
+		return ""
+	}
+	if i := strings.Index(msg, fatalMark); i >= 0 {
+		line := msg[i:]
+		if j := strings.IndexByte(line, '\n'); j >= 0 {
+			line = line[:j]
+		}
+		return clipRunes(strings.TrimSpace(line), 400)
+	}
+	// fall back to the last non-empty line of the tail
+	tail := clipRunes(msg, 800)
+	lines := strings.Split(tail, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if l := strings.TrimSpace(lines[i]); l != "" {
+			return clipRunes(l, 400)
+		}
+	}
+	return tail
+}
+
+// clipRunes truncates s to at most n runes.
+func clipRunes(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n])
+	}
+	return s
 }
 
 // errBuffer keeps the last 8 KiB of stderr, cut on rune boundaries so the
