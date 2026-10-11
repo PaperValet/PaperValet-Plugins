@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"sort"
 	"strconv"
@@ -291,9 +292,10 @@ func (p *QuotePlugin) sendPhoto(ctx *plugin.CommandContext, path string, replyTo
 		return err
 	}
 	req := &tg.MessagesSendMediaRequest{
-		Peer:    peer,
-		Media:   &tg.InputMediaUploadedPhoto{File: file},
-		Message: "",
+		Peer:     peer,
+		Media:    &tg.InputMediaUploadedPhoto{File: file},
+		Message:  "",
+		RandomID: rand.Int64(),
 	}
 	if replyTo > 0 {
 		req.SetReplyTo(&tg.InputReplyToMessage{ReplyToMsgID: replyTo})
@@ -313,7 +315,8 @@ func (p *QuotePlugin) sendSticker(ctx *plugin.CommandContext, path string, reply
 		return err
 	}
 	req := &tg.MessagesSendMediaRequest{
-		Peer: peer,
+		Peer:     peer,
+		RandomID: rand.Int64(),
 		Media: &tg.InputMediaUploadedDocument{
 			File:     file,
 			MimeType: "image/webp",
