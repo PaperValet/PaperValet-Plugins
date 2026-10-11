@@ -10,11 +10,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -65,13 +70,13 @@ func buildTools() []toolSpec {
 		},
 		{
 			Name:        "list_files",
-			Description: "列出目录下的文件与子目录，快速了解项目结构。",
-			DescEN:      "List files and subdirectories under a path.",
+			Description: "列出目录下的文件与子目录，快速了解项目结构。默认只列一层，加 recursive 才递归。",
+			DescEN:      "List files and subdirectories under a path. One level by default; set recursive to descend.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"path":      map[string]any{"type": "string", "description": "目录路径，默认工作区 / directory, defaults to the workspace"},
-					"recursive": map[string]any{"type": "boolean", "description": "是否递归 / recurse"},
+					"recursive": map[string]any{"type": "boolean", "description": "是否递归 / recurse into subdirectories"},
 				},
 			},
 		},
@@ -83,8 +88,8 @@ func buildTools() []toolSpec {
 				"type": "object",
 				"properties": map[string]any{
 					"path":       map[string]any{"type": "string", "description": "文件路径 / file path"},
-					"start_line": map[string]any{"type": "integer", "description": "起始行（1-based）"},
-					"end_line":   map[string]any{"type": "integer", "description": "结束行"},
+					"start_line": map[string]any{"type": "integer", "description": "起始行（1-based）/ first line, 1-based"},
+					"end_line":   map[string]any{"type": "integer", "description": "结束行（含）/ last line, inclusive"},
 				},
 				"required": []string{"path"},
 			},
@@ -97,8 +102,8 @@ func buildTools() []toolSpec {
 				"type": "object",
 				"properties": map[string]any{
 					"pattern":    map[string]any{"type": "string", "description": "正则 / pattern"},
-					"path":       map[string]any{"type": "string", "description": "搜索目录，默认工作区"},
-					"glob":       map[string]any{"type": "string", "description": "可选 glob，如 *.go"},
+					"path":       map[string]any{"type": "string", "description": "搜索目录，默认工作区 / directory, defaults to the workspace"},
+					"glob":       map[string]any{"type": "string", "description": "可选 glob，如 *.go / optional glob, e.g. *.go"},
 					"files_only": map[string]any{"type": "boolean", "description": "只返回文件名 / names only"},
 				},
 				"required": []string{"pattern"},
@@ -106,26 +111,26 @@ func buildTools() []toolSpec {
 		},
 		{
 			Name:        "write_file",
-			Description: "创建新文件或完整重写文件。",
-			DescEN:      "Create or overwrite a file.",
+			Description: "创建新文件或完整重写文件，内容原样写入。",
+			DescEN:      "Create or overwrite a file, writing the content verbatim.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"path":    map[string]any{"type": "string", "description": "文件路径 / file path"},
-					"content": map[string]any{"type": "string", "description": "文件内容 / contents"},
+					"content": map[string]any{"type": "string", "description": "文件内容 / contents, written verbatim"},
 				},
 				"required": []string{"path", "content"},
 			},
 		},
 		{
 			Name:        "run_command",
-			Description: "运行终端命令，返回 exit_code、stdout、stderr。",
-			DescEN:      "Run a shell command; returns exit_code, stdout and stderr.",
+			Description: "运行终端命令，返回 exit_code 和输出。",
+			DescEN:      "Run a shell command; returns the exit code and its output.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"command": map[string]any{"type": "string", "description": "要执行的 shell 命令 / shell command"},
-					"cwd":     map[string]any{"type": "string", "description": "工作目录，默认工作区 / working directory"},
+					"cwd":     map[string]any{"type": "string", "description": "工作目录，默认工作区 / working directory, defaults to the workspace"},
 				},
 				"required": []string{"command"},
 			},
@@ -164,7 +169,10 @@ func buildTools() []toolSpec {
 func (p *AgentPlugin) runTool(ctx context.Context, name, argsJSON string) toolResult {
 	var args map[string]any
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-		return toolResult{Output: "参数解析失败: " + err.Error(), IsError: true}
+		return toolResult{Output: "参数解析失败 / bad arguments: " + err.Error(), IsError: true}
+	}
+	if args == nil {
+		args = map[string]any{}
 	}
 	switch name {
 	case "update_plan":
@@ -182,8 +190,8 @@ func (p *AgentPlugin) runTool(ctx context.Context, name, argsJSON string) toolRe
 	case "send_file":
 		return p.toolSendFile(args)
 	case "finish":
-		msg, _ := args["message"].(string)
-		return toolResult{Output: msg}
+		// Not trimmed: this is the answer the owner reads.
+		return toolResult{Output: rawStrArg(args, "message")}
 	default:
 		return toolResult{Output: "未知工具 / unknown tool: " + name, IsError: true}
 	}
@@ -194,22 +202,51 @@ func (p *AgentPlugin) runTool(ctx context.Context, name, argsJSON string) toolRe
 // ============================================================
 
 func strArg(args map[string]any, key string) string {
+	return strings.TrimSpace(rawStrArg(args, key))
+}
+
+// rawStrArg reads a string argument verbatim. Trimming is right for a path and
+// wrong for file content, where it would eat the indentation of the first line
+// and the trailing newline of the last.
+func rawStrArg(args map[string]any, key string) string {
 	if v, ok := args[key].(string); ok {
-		return strings.TrimSpace(v)
+		return v
 	}
 	return ""
 }
 
 func boolArg(args map[string]any, key string) bool {
-	if v, ok := args[key].(bool); ok {
+	switch v := args[key].(type) {
+	case bool:
 		return v
+	case string:
+		// Models do quote booleans; a quoted "true" must not read as false.
+		b, err := strconv.ParseBool(strings.TrimSpace(v))
+		return err == nil && b
 	}
 	return false
 }
 
+// intArg reads a numeric argument. JSON numbers decode to float64, but a
+// quoted "5" must not silently degrade to 0 and read the whole file.
 func intArg(args map[string]any, key string) int {
-	if v, ok := args[key].(float64); ok {
+	switch v := args[key].(type) {
+	case float64:
 		return int(v)
+	case int:
+		return v
+	case json.Number:
+		n, err := v.Int64()
+		if err != nil {
+			return 0
+		}
+		return int(n)
+	case string:
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return 0
+		}
+		return n
 	}
 	return 0
 }
@@ -217,12 +254,16 @@ func intArg(args map[string]any, key string) int {
 // resolvePath turns a tool path into an absolute one: relative paths resolve
 // against the workspace, absolute paths pass through, and $workspace is
 // substituted so the model can echo paths it was shown.
+//
+// This is a convenience, not a sandbox: run_command gives the model a shell
+// with the host account's privileges, so containing the file tools alone would
+// only be theatre. The command is OwnerOnly for that reason.
 func (p *AgentPlugin) resolvePath(raw string) string {
 	ws := p.config().Workspace
 	if raw == "" {
 		return ws
 	}
-	raw = strings.ReplaceAll(raw, "$workspace", ws)
+	raw = expandHome(strings.ReplaceAll(raw, "$workspace", ws))
 	if filepath.IsAbs(raw) {
 		return filepath.Clean(raw)
 	}
@@ -235,79 +276,153 @@ func (p *AgentPlugin) resolvePath(raw string) string {
 
 const maxListEntries = 500
 
+// errListLimit stops the walk once the entry budget is spent.
+var errListLimit = errors.New("list limit reached")
+
 func (p *AgentPlugin) toolListFiles(args map[string]any) toolResult {
 	dir := p.resolvePath(strArg(args, "path"))
+	info, err := os.Stat(dir)
+	if err != nil {
+		// Checked before the walk: a missing directory used to report
+		// "(empty)", which sends the model looking in the wrong place.
+		return toolResult{Output: "读取目录失败 / cannot read directory: " + err.Error(), IsError: true}
+	}
+	if !info.IsDir() {
+		return toolResult{Output: "不是目录 / not a directory: " + dir, IsError: true}
+	}
 	recursive := boolArg(args, "recursive")
 
 	var sb strings.Builder
 	count, truncated := 0, false
-	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if path == dir {
+				return err
+			}
+			return nil // an unreadable subtree shows up as missing entries
+		}
+		if path == dir {
 			return nil
 		}
 		rel, relErr := filepath.Rel(dir, path)
 		if relErr != nil || rel == "." {
 			return nil
 		}
-		if info.IsDir() {
-			if !recursive && filepath.Dir(path) != dir {
+		if count >= maxListEntries {
+			truncated = true
+			return errListLimit
+		}
+		count++
+		if d.IsDir() {
+			fmt.Fprintf(&sb, "%s/\n", rel)
+			if !recursive {
+				// List the directory but do not descend into it, so a
+				// non-recursive call really stays one level deep.
 				return filepath.SkipDir
-			}
-			if count < maxListEntries {
-				fmt.Fprintf(&sb, "%s/\n", rel)
 			}
 			return nil
 		}
-		count++
-		if count > maxListEntries {
-			truncated = true
-			return filepath.SkipAll
+		if fi, fiErr := d.Info(); fiErr == nil {
+			fmt.Fprintf(&sb, "%s (%d bytes)\n", rel, fi.Size())
+		} else {
+			fmt.Fprintf(&sb, "%s\n", rel)
 		}
-		fmt.Fprintf(&sb, "%-60s %8d\n", rel, info.Size())
 		return nil
 	})
+	if walkErr != nil && !errors.Is(walkErr, errListLimit) {
+		return toolResult{Output: "读取目录失败 / cannot read directory: " + walkErr.Error(), IsError: true}
+	}
 	if sb.Len() == 0 {
 		return toolResult{Output: "(empty)"}
 	}
 	if truncated {
 		sb.WriteString(fmt.Sprintf("\n…truncated at %d entries", maxListEntries))
 	}
-	if _, err := os.Stat(dir); err != nil {
-		return toolResult{Output: "读取目录失败 / cannot read directory: " + err.Error(), IsError: true}
-	}
 	return toolResult{Output: sb.String()}
 }
 
-const maxReadBytes = 32000
+const (
+	// maxReadRunes is what the model gets from one read.
+	maxReadRunes = 32000
+	// maxReadFileBytes bounds how much of a file is pulled into memory to
+	// produce that window. Reading a multi-gigabyte log whole would exhaust
+	// a small host long before the truncation ever applied.
+	maxReadFileBytes = 4 << 20
+)
 
 func (p *AgentPlugin) toolReadFile(args map[string]any) toolResult {
 	path := p.resolvePath(strArg(args, "path"))
-	data, err := os.ReadFile(path)
+	info, err := os.Stat(path)
 	if err != nil {
 		return toolResult{Output: "读取失败 / read failed: " + err.Error(), IsError: true}
 	}
+	if info.IsDir() {
+		return toolResult{Output: "这是目录 / not a file: " + path, IsError: true}
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return toolResult{Output: "读取失败 / read failed: " + err.Error(), IsError: true}
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxReadFileBytes+1))
+	if err != nil {
+		return toolResult{Output: "读取失败 / read failed: " + err.Error(), IsError: true}
+	}
+	fileCapped := len(data) > maxReadFileBytes
+	if fileCapped {
+		data = data[:maxReadFileBytes]
+	}
+	if bytes.IndexByte(data, 0) >= 0 {
+		// Dumping binary bytes would burn the context window on noise.
+		return toolResult{Output: "二进制文件，内容未显示 / binary file, contents not shown: " + path, IsError: true}
+	}
+
 	lines := strings.Split(string(data), "\n")
 	start, end := intArg(args, "start_line"), intArg(args, "end_line")
+	if start < 0 {
+		start = 0
+	}
+	if end < 0 {
+		end = 0
+	}
 	if start > 0 || end > 0 {
-		if start <= 0 {
+		if start == 0 {
 			start = 1
 		}
 		if start > len(lines) {
-			return toolResult{Output: fmt.Sprintf("起始行 %d 超出文件总行数 %d", start, len(lines))}
+			return toolResult{
+				Output: fmt.Sprintf("起始行 %d 超出总行数 %d / start line %d beyond %d lines",
+					start, len(lines), start, len(lines)),
+				IsError: true,
+			}
 		}
-		if end <= 0 || end > len(lines) {
+		if end == 0 || end > len(lines) {
 			end = len(lines)
+		}
+		if end < start {
+			// A reversed range used to panic on the slice bounds and take
+			// the whole run down with it.
+			return toolResult{
+				Output:  fmt.Sprintf("行范围无效 / invalid range: start %d is after end %d", start, end),
+				IsError: true,
+			}
 		}
 		lines = lines[start-1 : end]
 	}
+
 	out := strings.Join(lines, "\n")
-	if len(out) > maxReadBytes {
-		out = out[:maxReadBytes] + "\n…(truncated)"
+	if fileCapped {
+		out += fmt.Sprintf("\n…(file is larger than %d bytes, only the head was read)", maxReadFileBytes)
 	}
-	return toolResult{Output: out}
+	return toolResult{Output: clipRunes(out, maxReadRunes)}
 }
 
-const maxSearchLines = 100
+const (
+	maxSearchLines  = 100
+	searchTimeout   = 30 * time.Second
+	maxCaptureBytes = 1 << 20
+)
 
 func (p *AgentPlugin) toolSearchFiles(ctx context.Context, args map[string]any) toolResult {
 	pattern := strArg(args, "pattern")
@@ -315,25 +430,29 @@ func (p *AgentPlugin) toolSearchFiles(ctx context.Context, args map[string]any) 
 		return toolResult{Output: "pattern 不能为空 / pattern is required", IsError: true}
 	}
 	dir := p.resolvePath(strArg(args, "path"))
-	glob := strArg(args, "glob")
-
-	regArgs := []string{"-n", "--no-heading", "--color=never"}
-	if boolArg(args, "files_only") {
-		regArgs = []string{"-l", "--color=never"}
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		return toolResult{Output: "搜索目录不可用 / cannot search: " + dir, IsError: true}
 	}
-	if glob != "" {
-		regArgs = append(regArgs, "-g", glob)
-	}
-	regArgs = append(regArgs, "-e", pattern, dir)
 
-	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	cctx, cancel := context.WithTimeout(ctx, searchTimeout)
 	defer cancel()
-	res := runCapture(cctx, "rg", regArgs...)
-	if strings.TrimSpace(res) == "" {
-		// Fall back to grep when ripgrep is absent.
-		res = runCapture(cctx, "grep", "-rn", "-E", pattern, dir)
+
+	out, code, err := searchRun(cctx, p.toolEnv(), pattern, dir, strArg(args, "glob"), boolArg(args, "files_only"))
+	if err != nil {
+		return toolResult{Output: "搜索失败 / search failed: " + err.Error(), IsError: true}
 	}
-	res = strings.TrimSpace(res)
+	// rg and grep both use exit code 1 for "no matches" and 2+ for "the
+	// search itself broke", e.g. an invalid regex. Reporting the latter as a
+	// result would hand the model an error message disguised as hits.
+	if code >= 2 {
+		msg := strings.TrimSpace(out)
+		if msg == "" {
+			msg = fmt.Sprintf("exit code %d", code)
+		}
+		return toolResult{Output: "搜索失败 / search failed: " + firstLines(msg, 400), IsError: true}
+	}
+
+	res := strings.TrimSpace(out)
 	if res == "" {
 		return toolResult{Output: "未找到匹配 / no matches"}
 	}
@@ -345,9 +464,46 @@ func (p *AgentPlugin) toolSearchFiles(ctx context.Context, args map[string]any) 
 	return toolResult{Output: res}
 }
 
+// searchRun prefers ripgrep and falls back to grep only when ripgrep is not
+// installed. Deciding on "the output was empty" instead would re-scan the
+// whole tree on every legitimate no-match result. Both engines get the same
+// options so the two paths mean the same thing.
+func searchRun(ctx context.Context, env []string, pattern, dir, glob string, filesOnly bool) (string, int, error) {
+	var args []string
+	if rg, err := exec.LookPath("rg"); err == nil {
+		args = []string{"--color=never", "--no-messages"}
+		if filesOnly {
+			args = append(args, "-l")
+		} else {
+			args = append(args, "-n", "--no-heading")
+		}
+		if glob != "" {
+			args = append(args, "-g", glob)
+		}
+		// -e keeps a pattern that starts with "-" from being read as a flag,
+		// and -- keeps a directory that does the same from being read as one.
+		args = append(args, "-e", pattern, "--", dir)
+		return runCapture(ctx, env, rg, args...)
+	}
+	args = []string{"-r", "-I", "-s", "-E", "--colour=never"}
+	if filesOnly {
+		args = append(args, "-l")
+	} else {
+		args = append(args, "-n")
+	}
+	if glob != "" {
+		args = append(args, "--include="+glob)
+	}
+	args = append(args, "-e", pattern, "--", dir)
+	return runCapture(ctx, env, "grep", args...)
+}
+
 func (p *AgentPlugin) toolWriteFile(args map[string]any) toolResult {
 	path := p.resolvePath(strArg(args, "path"))
-	content := strArg(args, "content")
+	if strings.TrimSpace(path) == "" {
+		return toolResult{Output: "path 不能为空 / path is required", IsError: true}
+	}
+	content := rawStrArg(args, "content")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return toolResult{Output: "创建目录失败 / mkdir failed: " + err.Error(), IsError: true}
 	}
@@ -371,14 +527,15 @@ func (p *AgentPlugin) toolRunCommand(ctx context.Context, args map[string]any) t
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	out, code, timedOut := runShell(cctx, command, cwd)
+	out, code, timedOut := runShell(cctx, command, cwd, p.toolEnv())
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "exit_code=%d\n", code)
 	if s := strings.TrimSpace(out); s != "" {
-		fmt.Fprintf(&sb, "output:\n%s\n", clipBytes(s, 20000))
+		fmt.Fprintf(&sb, "output:\n%s\n", clipMiddle(s, 20000))
 	}
 	if timedOut {
-		sb.WriteString("(命令超时被终止 / command timed out)")
+		sb.WriteString(fmt.Sprintf("(命令在 %d 秒后超时被终止 / command killed after %ds)",
+			int(timeout.Seconds()), int(timeout.Seconds())))
 	}
 	return toolResult{Output: sb.String(), IsError: code != 0}
 }
@@ -392,6 +549,9 @@ func (p *AgentPlugin) toolSendFile(args map[string]any) toolResult {
 	if info.IsDir() {
 		return toolResult{Output: "这是目录，不能发送 / not a file: " + path, IsError: true}
 	}
+	if info.Size() == 0 {
+		return toolResult{Output: "文件是空的 / the file is empty: " + path, IsError: true}
+	}
 	return toolResult{
 		Output:   fmt.Sprintf("ready to send %s (%d bytes)", path, info.Size()),
 		SendFile: path,
@@ -402,61 +562,196 @@ func (p *AgentPlugin) toolSendFile(args map[string]any) toolResult {
 // Process helpers
 // ============================================================
 
-// agentPath is prepended to PATH so tools resolve even when the host was
-// started with a minimal environment (systemd units often lack /usr/bin).
-const agentPath = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+// stdPath lists the directories a minimal systemd environment leaves out.
+const stdPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-func runCapture(ctx context.Context, name string, args ...string) string {
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Env = append(os.Environ(), agentPath)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-	_ = cmd.Run()
-	return out.String()
+// toolEnv builds the child environment. A systemd unit starts with no HOME and
+// a bare PATH, which makes git, npm and friends abort or write to the wrong
+// place, so both get a fallback without discarding what the host did set.
+func (p *AgentPlugin) toolEnv() []string {
+	return buildEnv(os.Environ(), p.dataDir)
 }
 
-// runShell executes a command and returns its combined output plus the exit
-// code; timedOut reports a deadline hit so the model can tell the difference
-// between a failure and a timeout.
-func runShell(ctx context.Context, command, dir string) (output string, code int, timedOut bool) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		dir = ""
+// buildEnv is toolEnv split out so the fallbacks can be tested directly.
+func buildEnv(base []string, dataDir string) []string {
+	out := make([]string, 0, len(base)+2)
+	var havePath, haveHome bool
+	for _, kv := range base {
+		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+			havePath = true
+			out = append(out, "PATH="+extendPath(v))
+			continue
+		}
+		if v, ok := strings.CutPrefix(kv, "HOME="); ok {
+			if v == "" {
+				continue // an empty HOME is the same as no HOME
+			}
+			haveHome = true
+		}
+		out = append(out, kv)
 	}
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", command)
-	if dir != "" {
-		cmd.Dir = dir
+	if !havePath {
+		out = append(out, "PATH="+stdPath)
 	}
-	cmd.Env = append(os.Environ(), agentPath)
+	if !haveHome {
+		if home := fallbackHome(dataDir); home != "" {
+			out = append(out, "HOME="+home)
+		}
+	}
+	return out
+}
 
-	var buf bytes.Buffer
+// extendPath keeps the inherited PATH, because the owner's own toolchain lives
+// in it, and adds the standard directories it may be missing.
+func extendPath(p string) string {
+	if strings.TrimSpace(p) == "" {
+		return stdPath
+	}
+	seen := make(map[string]bool)
+	var parts []string
+	for _, d := range filepath.SplitList(p) {
+		if d == "" || seen[d] {
+			continue
+		}
+		seen[d] = true
+		parts = append(parts, d)
+	}
+	for _, d := range filepath.SplitList(stdPath) {
+		if !seen[d] {
+			parts = append(parts, d)
+		}
+	}
+	return strings.Join(parts, string(os.PathListSeparator))
+}
+
+// fallbackHome resolves a HOME for a child process when the host has none.
+func fallbackHome(dataDir string) string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return home
+	}
+	if dataDir == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(dataDir); err == nil {
+		return abs
+	}
+	return dataDir
+}
+
+// usableDir reports dir only when it already exists. A cwd the model invented
+// must never be created: run_command has the host account's privileges, and
+// mkdir-ing whatever path arrives would litter the filesystem.
+func usableDir(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+		return dir
+	}
+	return ""
+}
+
+// runShell executes a command and returns its output plus the exit code;
+// timedOut reports a deadline hit so the model can tell the difference between
+// a failure and a timeout.
+func runShell(ctx context.Context, command, dir string, env []string) (output string, code int, timedOut bool) {
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", command)
+	if d := usableDir(dir); d != "" {
+		cmd.Dir = d
+	}
+	cmd.Env = env
+	setProcGroup(cmd)
+
+	var buf limitedBuffer
+	buf.limit = maxCaptureBytes
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
 	err := cmd.Run()
 
 	if err != nil {
 		var ee *exec.ExitError
-		if ok := asExitError(err, &ee); ok {
+		if errors.As(err, &ee) {
 			code = ee.ExitCode()
 		} else {
 			code = -1
 		}
 	}
-	timedOut = ctx.Err() == context.DeadlineExceeded
+	timedOut = errors.Is(ctx.Err(), context.DeadlineExceeded)
 	return buf.String(), code, timedOut
 }
 
-func asExitError(err error, target **exec.ExitError) bool {
-	if ee, ok := err.(*exec.ExitError); ok {
-		*target = ee
-		return true
+// runCapture runs a helper and reports its output, its exit code and any spawn
+// failure. Exit code 1 from rg/grep means "no matches", which callers must not
+// mistake for a missing binary or a broken pattern.
+func runCapture(ctx context.Context, env []string, name string, args ...string) (string, int, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = env
+	setProcGroup(cmd)
+
+	var buf limitedBuffer
+	buf.limit = maxCaptureBytes
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+
+	if err := cmd.Run(); err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return buf.String(), ee.ExitCode(), nil
+		}
+		return buf.String(), -1, err
 	}
-	return false
+	return buf.String(), 0, nil
 }
 
-func clipBytes(s string, n int) string {
-	if len(s) <= n {
+// limitedBuffer collects process output up to a cap and keeps draining past
+// it, so a command that spews gigabytes cannot exhaust memory before its
+// timeout fires and a blocked child cannot deadlock on a full pipe.
+type limitedBuffer struct {
+	mu    sync.Mutex
+	b     []byte
+	limit int
+	over  bool
+}
+
+func (l *limitedBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.limit <= 0 {
+		l.limit = maxCaptureBytes
+	}
+	if room := l.limit - len(l.b); room > 0 {
+		if len(p) > room {
+			p = p[:room]
+		}
+		l.b = append(l.b, p...)
+	}
+	if l.b != nil && len(l.b) >= l.limit && n > 0 {
+		l.over = true
+	}
+	return n, nil
+}
+
+func (l *limitedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	s := string(l.b)
+	if l.over {
+		s += "\n…(output capped)"
+	}
+	return s
+}
+
+// clipMiddle keeps the head and the tail of s, which is what command output
+// needs: the start shows what ran, the end shows why it failed.
+func clipMiddle(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
-	return s[:n] + "\n…(truncated)"
+	half := n / 2
+	if half < 1 {
+		half = 1
+	}
+	return string(r[:half]) + "\n…(truncated)……(truncated)…" + string(r[len(r)-half:])
 }

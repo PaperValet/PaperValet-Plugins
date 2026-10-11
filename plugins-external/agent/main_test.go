@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,8 +65,8 @@ func TestBoolAndIntArgs(t *testing.T) {
 	if got := intArg(args, "n"); got != 7 {
 		t.Errorf("intArg(n) = %d, want 7", got)
 	}
-	if got := intArg(args, "s"); got != 0 {
-		t.Errorf("intArg on a string = %d, want 0", got)
+	if got := intArg(args, "s"); got != 7 {
+		t.Errorf("intArg on a quoted string = %d, want 7 (quoted numbers must parse)", got)
 	}
 }
 
@@ -160,7 +161,8 @@ func TestElapsedFormats(t *testing.T) {
 // ============================================================
 
 func TestRunShellExitCodeAndOutput(t *testing.T) {
-	out, code, timedOut := runShell(t.Context(), "echo hello", t.TempDir())
+	env := buildEnv(os.Environ(), "")
+	out, code, timedOut := runShell(t.Context(), "echo hello", t.TempDir(), env)
 	if code != 0 {
 		t.Errorf("exit code = %d, want 0 (output %q)", code, out)
 	}
@@ -173,16 +175,23 @@ func TestRunShellExitCodeAndOutput(t *testing.T) {
 }
 
 func TestRunShellReportsNonZero(t *testing.T) {
-	_, code, _ := runShell(t.Context(), "exit 3", t.TempDir())
+	env := buildEnv(os.Environ(), "")
+	_, code, _ := runShell(t.Context(), "exit 3", t.TempDir(), env)
 	if code != 3 {
 		t.Errorf("exit code = %d, want 3", code)
 	}
 }
 
 func TestRunShellMissingCwdFallsBack(t *testing.T) {
-	out, code, _ := runShell(t.Context(), "echo ok", "/definitely/not/a/dir")
+	missing := filepath.Join(t.TempDir(), "nope")
+	env := buildEnv(os.Environ(), "")
+	out, code, _ := runShell(t.Context(), "echo ok", missing, env)
 	if code != 0 || !strings.Contains(out, "ok") {
 		t.Errorf("should fall back to the process cwd, got code=%d out=%q", code, out)
+	}
+	// usableDir must not invent directories for the model.
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Errorf("a missing cwd must not be created, stat err = %v", err)
 	}
 }
 
@@ -293,9 +302,8 @@ func TestSessionHistoryIsCapped(t *testing.T) {
 	for i := 0; i < 60; i++ {
 		p.appendHistory(1, chatMessage{Role: "user", Content: "x"})
 	}
-	s := p.getSession(1)
-	if len(s.Messages) > maxHistory {
-		t.Errorf("history = %d messages, want at most %d", len(s.Messages), maxHistory)
+	if n := p.historyLen(1); n > maxHistory {
+		t.Errorf("history = %d messages, want at most %d", n, maxHistory)
 	}
 }
 
@@ -308,12 +316,12 @@ func TestSessionHistoryDropsLeadingToolMessages(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		p.appendHistory(1, chatMessage{Role: "tool", ToolCallID: "1", Content: "y"})
 	}
-	s := p.getSession(1)
-	if len(s.Messages) > 0 && s.Messages[0].Role == "tool" {
+	hist := p.historySnapshot(1)
+	if len(hist) > 0 && hist[0].Role == "tool" {
 		t.Error("history must not start with a tool message")
 	}
-	if len(s.Messages) > maxHistory {
-		t.Errorf("history grew to %d", len(s.Messages))
+	if len(hist) > maxHistory {
+		t.Errorf("history grew to %d", len(hist))
 	}
 }
 
@@ -321,21 +329,21 @@ func TestClearSession(t *testing.T) {
 	p := New()
 	p.appendHistory(1, chatMessage{Role: "user", Content: "x"})
 	p.clearSession(1)
-	if p.getSession(1) != nil {
+	if p.historySnapshot(1) != nil {
 		t.Error("session should be gone")
 	}
 }
 
 func TestSingleRunPerChat(t *testing.T) {
 	p := New()
-	if !p.tryStart(1) {
+	if !p.tryStart(1, func() {}) {
 		t.Fatal("first start should win")
 	}
-	if p.tryStart(1) {
+	if p.tryStart(1, func() {}) {
 		t.Error("second start in the same chat must be refused")
 	}
 	p.finishRun(1)
-	if !p.tryStart(1) {
+	if !p.tryStart(1, func() {}) {
 		t.Error("after finishing, a new run should start")
 	}
 }
@@ -373,6 +381,264 @@ func TestConfigOverrides(t *testing.T) {
 	}
 	if cfg.MaxSteps != 3 || cfg.CmdTimeout != 9 {
 		t.Errorf("numeric overrides failed: %+v", cfg)
+	}
+}
+
+// ============================================================
+// Argument shapes providers send
+// ============================================================
+
+func TestArgsTextHandlesProviderShapes(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"string-encoded object", `"{\"path\":\"a.txt\"}"`, `{"path":"a.txt"}`},
+		{"plain object", `{"path":"a.txt"}`, `{"path":"a.txt"}`},
+		{"empty string", `""`, `{}`},
+		{"null", `null`, `{}`},
+		{"missing", ``, `{}`},
+	}
+	for _, c := range cases {
+		call := toolCall{Function: struct {
+			Name string `json:"name"`
+			// Arguments is raw because providers disagree about its shape: most
+			// send a JSON-encoded string, some send the object itself. Decoding
+			// it as a plain string makes the whole response fail on the latter.
+			Arguments json.RawMessage `json:"arguments"`
+		}{Name: "t", Arguments: json.RawMessage(c.raw)}}
+		if got := call.argsText(); got != c.want {
+			t.Errorf("%s: argsText(%s) = %q, want %q", c.name, c.raw, got, c.want)
+		}
+	}
+}
+
+// ============================================================
+// History sanitization
+// ============================================================
+
+func TestSanitizeHistoryDropsOrphanToolReplies(t *testing.T) {
+	in := []chatMessage{
+		{Role: "user", Content: "hi"},
+		{Role: "tool", ToolCallID: "gone", Content: "orphan"},
+		{Role: "assistant", Content: "answer"},
+	}
+	out := sanitizeHistory(in)
+	if len(out) != 2 || out[0].Role != "user" || out[1].Role != "assistant" {
+		t.Fatalf("orphan tool reply must be dropped, got %+v", out)
+	}
+}
+
+func TestSanitizeHistoryDropsIncompleteCallSets(t *testing.T) {
+	in := []chatMessage{
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", ToolCalls: []toolCall{{ID: "a"}, {ID: "b"}}},
+		{Role: "tool", ToolCallID: "a", Content: "first"},
+		{Role: "user", Content: "next"},
+	}
+	out := sanitizeHistory(in)
+	// The half-answered call set and its only reply are dropped together.
+	if len(out) != 2 || out[0].Role != "user" || out[1].Role != "user" {
+		t.Fatalf("incomplete call set must be dropped, got %+v", out)
+	}
+}
+
+func TestSanitizeHistoryKeepsCompletePairs(t *testing.T) {
+	in := []chatMessage{
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", ToolCalls: []toolCall{{ID: "a"}, {ID: "b"}}},
+		{Role: "tool", ToolCallID: "a", Content: "first"},
+		{Role: "tool", ToolCallID: "b", Content: "second"},
+		{Role: "assistant", Content: "done"},
+	}
+	out := sanitizeHistory(in)
+	if len(out) != 5 {
+		t.Fatalf("complete pairs must survive, got %d messages", len(out))
+	}
+}
+
+// ============================================================
+// Child environment
+// ============================================================
+
+func TestBuildEnvFillsMissingPathAndHome(t *testing.T) {
+	env := buildEnv(nil, "/data/agent")
+	joined := strings.Join(env, "\n")
+	if !strings.Contains(joined, "PATH="+stdPath) {
+		t.Errorf("missing PATH should be filled, got %q", joined)
+	}
+	if !strings.Contains(joined, "HOME=") {
+		t.Errorf("missing HOME should be filled, got %q", joined)
+	}
+}
+
+func TestBuildEnvExtendsAndKeepsExisting(t *testing.T) {
+	env := buildEnv([]string{"PATH=/opt/bin", "HOME=/root", "K=V"}, "")
+	joined := strings.Join(env, "\n")
+	if !strings.Contains(joined, "PATH=/opt/bin:"+stdPath) {
+		t.Errorf("existing PATH should be kept and extended, got %q", joined)
+	}
+	if !strings.Contains(joined, "HOME=/root") {
+		t.Errorf("existing HOME must survive verbatim, got %q", joined)
+	}
+	if !strings.Contains(joined, "K=V") {
+		t.Errorf("unrelated entries must survive, got %q", joined)
+	}
+}
+
+func TestExtendPathDeduplicates(t *testing.T) {
+	got := extendPath("/bin:/opt/bin:/bin")
+	want := "/bin:/opt/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin"
+	if got != want {
+		t.Errorf("extendPath = %q, want %q", got, want)
+	}
+}
+
+func TestUsableDir(t *testing.T) {
+	dir := t.TempDir()
+	if got := usableDir(dir); got != dir {
+		t.Errorf("usableDir(existing) = %q, want %q", got, dir)
+	}
+	missing := filepath.Join(dir, "nope")
+	if got := usableDir(missing); got != "" {
+		t.Errorf("usableDir(missing) = %q, want empty", got)
+	}
+	if got := usableDir(""); got != "" {
+		t.Errorf("usableDir(empty) = %q, want empty", got)
+	}
+	file := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := usableDir(file); got != "" {
+		t.Errorf("usableDir(file) = %q, want empty", got)
+	}
+}
+
+func TestExpandHome(t *testing.T) {
+	t.Setenv("HOME", "/home/tester")
+	cases := map[string]string{
+		"~/x":      "/home/tester/x",
+		"~":        "/home/tester",
+		"/abs":     "/abs",
+		"rel":      "rel",
+		"~other/x": "~other/x", // only ~ and ~/ expand
+	}
+	for in, want := range cases {
+		if got := expandHome(in); got != want {
+			t.Errorf("expandHome(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// ============================================================
+// Card clipping
+// ============================================================
+
+func TestClipCardCutsAtLineBoundary(t *testing.T) {
+	s := strings.Repeat("line\n", 100)
+	got := clipCard(s, 12)
+	if !strings.HasSuffix(got, "\n…") {
+		t.Errorf("clipCard should end with a newline plus ellipsis, got %q", got)
+	}
+	body := strings.TrimSuffix(got, "\n…")
+	if !strings.HasSuffix(body, "line") {
+		t.Errorf("cut must land after a complete line, got %q", body)
+	}
+}
+
+func TestClipMiddleKeepsHeadAndTail(t *testing.T) {
+	s := strings.Repeat("a", 1000) + "MIDDLE" + strings.Repeat("b", 1000)
+	got := clipMiddle(s, 100)
+	if !strings.HasPrefix(got, strings.Repeat("a", 50)) {
+		t.Errorf("head must be kept, got %q", got[:60])
+	}
+	if !strings.HasSuffix(got, strings.Repeat("b", 50)) {
+		t.Errorf("tail must be kept, got %q", got[len(got)-60:])
+	}
+	if strings.Contains(got, "MIDDLE") {
+		t.Error("the middle must be elided")
+	}
+}
+
+func TestClipMiddleShortStringsPassThrough(t *testing.T) {
+	if got := clipMiddle("short", 100); got != "short" {
+		t.Errorf("clipMiddle = %q, want short", got)
+	}
+}
+
+// ============================================================
+// Output buffer
+// ============================================================
+
+func TestLimitedBufferCapsButKeepsDraining(t *testing.T) {
+	var buf limitedBuffer
+	buf.limit = 16
+	chunk := strings.Repeat("x", 64)
+	for i := 0; i < 8; i++ { // 512 bytes through a 16-byte window
+		if n, err := buf.Write([]byte(chunk)); err != nil || n != len(chunk) {
+			t.Fatalf("Write must swallow everything: n=%d err=%v", n, err)
+		}
+	}
+	got := buf.String()
+	if len(got) == 0 || len(got) > 16+20 {
+		t.Errorf("buffer should hold about the cap, got %d bytes", len(got))
+	}
+	if !strings.Contains(got, "output capped") {
+		t.Errorf("cap should be reported, got %q", got)
+	}
+}
+
+// ============================================================
+// Tool edge cases
+// ============================================================
+
+func TestReadFileReversedRangeIsError(t *testing.T) {
+	dir := t.TempDir()
+	p := &AgentPlugin{set: stubSettings{"workspace": dir}}
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("1\n2\n3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := p.toolReadFile(map[string]any{"path": "f.txt", "start_line": float64(3), "end_line": float64(1)})
+	if !res.IsError {
+		t.Errorf("a reversed range must be an error, got %+v", res)
+	}
+}
+
+func TestReadFileRejectsBinary(t *testing.T) {
+	dir := t.TempDir()
+	p := &AgentPlugin{set: stubSettings{"workspace": dir}}
+	if err := os.WriteFile(filepath.Join(dir, "bin.dat"), []byte("ab\x00cd"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := p.toolReadFile(map[string]any{"path": "bin.dat"})
+	if !res.IsError || !strings.Contains(res.Output, "binary") {
+		t.Errorf("binary content must be refused, got %+v", res)
+	}
+}
+
+func TestListFilesMissingDirIsError(t *testing.T) {
+	p := &AgentPlugin{set: stubSettings{"workspace": t.TempDir()}}
+	if res := p.toolListFiles(map[string]any{"path": "nope"}); !res.IsError {
+		t.Errorf("a missing directory must be an error, got %+v", res)
+	}
+}
+
+func TestWriteFileKeepsContentVerbatim(t *testing.T) {
+	dir := t.TempDir()
+	p := &AgentPlugin{set: stubSettings{"workspace": dir}}
+	content := "\n  indented\n\n"
+	res := p.toolWriteFile(map[string]any{"path": "f.txt", "content": content})
+	if res.IsError {
+		t.Fatalf("write failed: %s", res.Output)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "f.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != content {
+		t.Errorf("content changed: wrote %q, got %q", content, data)
 	}
 }
 

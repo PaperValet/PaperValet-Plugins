@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/TiaraBasori/PaperValet/pkg/plugin"
 	"github.com/gotd/td/tg"
@@ -30,9 +31,12 @@ var Metadata = &plugin.PluginMetadata{
 const (
 	defaultBaseURL    = "https://api.deepseek.com/v1"
 	defaultModel      = "deepseek-chat"
-	defaultWorkspace  = "/root/agent-workspace"
 	defaultMaxSteps   = 15
 	defaultCmdTimeout = 60
+	// workspaceDirname is the workspace location under data/agent, used
+	// whenever the owner leaves the setting empty. A hardcoded absolute
+	// path would be wrong for a non-root install and on Windows.
+	workspaceDirname = "workspace"
 )
 
 func helpText(ctx *plugin.CommandContext) string {
@@ -51,11 +55,11 @@ func helpText(ctx *plugin.CommandContext) string {
 		"> " + plugin.Code("agent help") + " — " + ctx.Tlocal("这份帮助", "this help"),
 		"",
 		plugin.Bold(ctx.Tlocal("可用的工具", "Tools")),
-		"> " + tlocal("列目录 · 读文件 · 搜索 · 写文件 · 执行命令 · 发送文件",
+		"> " + ctx.Tlocal("列目录 · 读文件 · 搜索 · 写文件 · 执行命令 · 发送文件",
 			"list · read · search · write · run command · send file"),
 		"",
-		"> " + ctx.Tlocal("模型、密钥与限制在机器人面板设置：/menu → AI 智能体",
-			"Model, key and limits live in the bot panel: /menu → AI agent"),
+		"> " + ctx.Tlocal("模型、密钥与限制在机器人面板设置：/menu → 外置插件 → agent",
+			"Model, key and limits live in the bot panel: /menu → External plugins → agent"),
 	}, "\n")
 }
 
@@ -71,7 +75,14 @@ type AgentPlugin struct {
 
 	mu       sync.Mutex
 	sessions map[int64]*session // chatID → conversation
-	running  map[int64]bool     // chatID → a task is in flight
+	running  map[int64]context.CancelFunc
+
+	// life bounds every background run so Stop can cancel in-flight tasks
+	// instead of leaving them editing messages through a torn-down host.
+	lifeMu sync.Mutex
+	life   context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 
 	selfID int64
 	tools  []toolSpec
@@ -81,9 +92,20 @@ type AgentPlugin struct {
 func New() *AgentPlugin {
 	return &AgentPlugin{
 		sessions: map[int64]*session{},
-		running:  map[int64]bool{},
+		running:  map[int64]context.CancelFunc{},
 		http:     newHTTPDoer(),
 	}
+}
+
+// lifetime returns the plugin-scoped context, creating it on first use so a
+// plugin built outside Init (tests) still works.
+func (p *AgentPlugin) lifetime() context.Context {
+	p.lifeMu.Lock()
+	defer p.lifeMu.Unlock()
+	if p.cancel == nil {
+		p.life, p.cancel = context.WithCancel(context.Background())
+	}
+	return p.life
 }
 
 func (p *AgentPlugin) Name() string        { return Metadata.Name }
@@ -143,9 +165,9 @@ func (p *AgentPlugin) Init(_ context.Context, mgr plugin.Manager) error {
 			},
 			{
 				Key: "workspace", Label: "工作区", LabelEN: "Workspace",
-				Kind: plugin.SettingText, Default: defaultWorkspace,
-				Hint:   "相对路径的基准目录",
-				HintEN: "Base directory for relative paths",
+				Kind:   plugin.SettingText,
+				Hint:   "相对路径的基准目录，留空则用 data/agent/workspace",
+				HintEN: "Base directory for relative paths; empty uses data/agent/workspace",
 			},
 			{
 				Key: "max_steps", Label: "最大步数", LabelEN: "Max steps",
@@ -182,16 +204,37 @@ func (p *AgentPlugin) Init(_ context.Context, mgr plugin.Manager) error {
 
 func (p *AgentPlugin) Start(context.Context) error {
 	p.selfID = p.host.SelfID()
-	_ = os.MkdirAll(p.config().Workspace, 0o755)
-	p.logger.Info("agent started", "self", p.selfID, "model", p.config().Model)
+	p.lifetime()
+	cfg := p.config()
+	if err := os.MkdirAll(cfg.Workspace, 0o755); err != nil {
+		p.logger.Warn("cannot create workspace", "path", cfg.Workspace, "err", err.Error())
+	}
+	p.logger.Info("agent started", "self", p.selfID, "model", cfg.Model, "workspace", cfg.Workspace)
 	return nil
 }
 
 func (p *AgentPlugin) Stop(context.Context) error {
+	p.lifeMu.Lock()
+	if p.cancel != nil {
+		p.cancel()
+		p.cancel = nil
+	}
+	p.lifeMu.Unlock()
+
+	// Wait for in-flight runs so nothing keeps editing messages through a
+	// host that is being torn down.
+	done := make(chan struct{})
+	go func() { p.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		p.logger.Warn("stop timed out waiting for running tasks")
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.sessions = map[int64]*session{}
-	p.running = map[int64]bool{}
+	p.running = map[int64]context.CancelFunc{}
 	return nil
 }
 
@@ -202,16 +245,17 @@ func (p *AgentPlugin) Stop(context.Context) error {
 func (p *AgentPlugin) handle(ctx *plugin.CommandContext) error {
 	arg := strings.TrimSpace(ctx.RawArgs)
 
-	if a := strings.ToLower(ctx.GetArg(0)); a == "help" || a == "h" {
+	// One spelling per subcommand, no hidden aliases.
+	switch strings.ToLower(firstWord(arg)) {
+	case "", "help":
 		return editNoPreview(ctx, helpText(ctx))
-	}
-	if arg == "" {
-		return editNoPreview(ctx, helpText(ctx))
-	}
-	switch strings.ToLower(arg) {
-	case "reset", "new":
+	case "reset":
+		// Reset also stops an in-flight run; otherwise the task keeps
+		// writing history into the session the owner just cleared.
+		p.cancelRun(ctx.Message.ChatID)
 		p.clearSession(ctx.Message.ChatID)
-		return editNoPreview(ctx, "🧹 "+ctx.Tlocal("已清空对话上下文。", "Conversation context cleared."))
+		return editNoPreview(ctx, "🧹 "+ctx.Tlocal("已停止当前任务并清空对话上下文。",
+			"Stopped the running task and cleared the conversation."))
 	case "status":
 		return p.handleStatus(ctx)
 	}
@@ -219,42 +263,73 @@ func (p *AgentPlugin) handle(ctx *plugin.CommandContext) error {
 	cfg := p.config()
 	if cfg.APIKey == "" {
 		return editNoPreview(ctx, "❌ "+ctx.Tlocal("还没有配置 API 密钥", "No API key configured yet")+
-			"\n> "+ctx.Tlocal("请在机器人面板 /menu → AI 智能体 里设置密钥、地址和模型",
-			"Set the key, base URL and model in the bot panel: /menu → AI agent"))
+			"\n> "+ctx.Tlocal("请在机器人面板 /menu → 外置插件 → agent 里设置密钥、地址和模型",
+			"Set the key, base URL and model in the bot panel: /menu → External plugins → agent"))
 	}
 
 	chatID := ctx.Message.ChatID
-	if !p.tryStart(chatID) {
-		return editNoPreview(ctx, "⏳ "+ctx.Tlocal("上一个任务还在执行，请稍候（或发 agent reset 清空上下文）",
-			"A task is still running, please wait (or send agent reset)"))
-	}
-
 	msgID := 0
-	if ctx.Message != nil && ctx.Message.Message != nil {
+	if ctx.Message.Message != nil {
 		msgID = ctx.Message.Message.ID
 	}
-	go p.runTask(chatID, msgID, arg)
+
+	runCtx, cancel := context.WithTimeout(p.lifetime(), runTimeout)
+	if !p.tryStart(chatID, cancel) {
+		cancel()
+		return editNoPreview(ctx, "⏳ "+ctx.Tlocal("上一个任务还在执行，请稍候（发 agent reset 可以停掉它）",
+			"A task is still running, please wait (agent reset stops it)"))
+	}
+
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		p.runTask(runCtx, chatID, msgID, arg)
+	}()
 	return nil
+}
+
+// firstWord is the leading whitespace-delimited token of s.
+func firstWord(s string) string {
+	if i := strings.IndexAny(s, " \t\n"); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 func (p *AgentPlugin) handleStatus(ctx *plugin.CommandContext) error {
 	cfg := p.config()
-	s := p.getSession(ctx.Message.ChatID)
-	turns := 0
-	if s != nil {
-		turns = len(s.Messages)
+	key := ctx.Tlocal("未设置", "not set")
+	if cfg.APIKey != "" {
+		key = ctx.Tlocal("已设置", "configured")
+	}
+	busy := ctx.Tlocal("空闲", "idle")
+	if p.isRunning(ctx.Message.ChatID) {
+		busy = ctx.Tlocal("任务执行中", "task running")
 	}
 	lines := []string{
-		"📊 " + ctx.Tlocal("智能体状态", "Agent status"),
+		"📊 " + plugin.Bold(ctx.Tlocal("智能体状态", "Agent status")),
 		"",
+		fieldLine(ctx.Tlocal("密钥", "API key"), key),
 		fieldLine(ctx.Tlocal("模型", "Model"), cfg.Model),
 		fieldLine(ctx.Tlocal("地址", "Base URL"), cfg.BaseURL),
 		fieldLine(ctx.Tlocal("工作区", "Workspace"), cfg.Workspace),
 		fieldLine(ctx.Tlocal("最大步数", "Max steps"), fmt.Sprintf("%d", cfg.MaxSteps)),
-		fieldLine(ctx.Tlocal("历史消息", "History"), fmt.Sprintf("%d", turns)),
+		fieldLine(ctx.Tlocal("命令超时", "Command timeout"), fmt.Sprintf("%ds", cfg.CmdTimeout)),
+		fieldLine(ctx.Tlocal("历史消息", "History"), fmt.Sprintf("%d", p.historyLen(ctx.Message.ChatID))),
+		fieldLine(ctx.Tlocal("状态", "State"), busy),
 	}
 	return editNoPreview(ctx, strings.Join(lines, "\n"))
 }
+
+// maxHistory caps the replayed conversation window. Package scope so the
+// tests can assert against the same constant the trim uses.
+const maxHistory = 40
+
+// historyToolClip bounds a single tool result kept in the replayed history.
+// The live turn gets the full observation; older turns only need the gist, or
+// a handful of 20 KB command outputs push the next request past the model's
+// context window.
+const historyToolClip = 600
 
 // ============================================================
 // Session state
@@ -264,10 +339,27 @@ type session struct {
 	Messages []chatMessage
 }
 
-func (p *AgentPlugin) getSession(chatID int64) *session {
+func (p *AgentPlugin) historySnapshot(chatID int64) []chatMessage {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.sessions[chatID]
+	s := p.sessions[chatID]
+	if s == nil || len(s.Messages) == 0 {
+		return nil
+	}
+	// Copy under the lock: a running task appends to this slice while
+	// handleStatus and the next run read it.
+	out := make([]chatMessage, len(s.Messages))
+	copy(out, s.Messages)
+	return out
+}
+
+func (p *AgentPlugin) historyLen(chatID int64) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if s := p.sessions[chatID]; s != nil {
+		return len(s.Messages)
+	}
+	return 0
 }
 
 func (p *AgentPlugin) appendHistory(chatID int64, msgs ...chatMessage) {
@@ -278,8 +370,12 @@ func (p *AgentPlugin) appendHistory(chatID int64, msgs ...chatMessage) {
 		s = &session{}
 		p.sessions[chatID] = s
 	}
-	s.Messages = append(s.Messages, msgs...)
-	const maxHistory = 40
+	for _, m := range msgs {
+		if m.Role == "tool" {
+			m.Content = clipRunes(m.Content, historyToolClip)
+		}
+		s.Messages = append(s.Messages, m)
+	}
 	if len(s.Messages) > maxHistory {
 		s.Messages = s.Messages[len(s.Messages)-maxHistory:]
 		for len(s.Messages) > 0 && s.Messages[0].Role == "tool" {
@@ -294,20 +390,45 @@ func (p *AgentPlugin) clearSession(chatID int64) {
 	delete(p.sessions, chatID)
 }
 
-func (p *AgentPlugin) tryStart(chatID int64) bool {
+// tryStart claims the chat for one run and stores the cancel func so
+// agent reset can stop it.
+func (p *AgentPlugin) tryStart(chatID int64, cancel context.CancelFunc) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.running[chatID] {
+	if _, ok := p.running[chatID]; ok {
 		return false
 	}
-	p.running[chatID] = true
+	p.running[chatID] = cancel
 	return true
 }
 
 func (p *AgentPlugin) finishRun(chatID int64) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	cancel := p.running[chatID]
 	delete(p.running, chatID)
+	p.mu.Unlock()
+	if cancel != nil {
+		// The run is over; cancel releases the deadline timer instead of
+		// letting it tick for the rest of runTimeout.
+		cancel()
+	}
+}
+
+func (p *AgentPlugin) isRunning(chatID int64) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, ok := p.running[chatID]
+	return ok
+}
+
+// cancelRun stops the in-flight task of a chat, if any.
+func (p *AgentPlugin) cancelRun(chatID int64) {
+	p.mu.Lock()
+	cancel := p.running[chatID]
+	p.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // ============================================================
@@ -327,7 +448,7 @@ func (p *AgentPlugin) config() config {
 	c := config{
 		BaseURL:    defaultBaseURL,
 		Model:      defaultModel,
-		Workspace:  defaultWorkspace,
+		Workspace:  p.defaultWorkspace(),
 		MaxSteps:   defaultMaxSteps,
 		CmdTimeout: defaultCmdTimeout,
 	}
@@ -342,7 +463,7 @@ func (p *AgentPlugin) config() config {
 		c.Model = v
 	}
 	if v := strings.TrimSpace(p.set.String("workspace")); v != "" {
-		c.Workspace = v
+		c.Workspace = expandHome(v)
 	}
 	if v := p.set.Int("max_steps"); v > 0 {
 		c.MaxSteps = v
@@ -351,6 +472,28 @@ func (p *AgentPlugin) config() config {
 		c.CmdTimeout = v
 	}
 	return c
+}
+
+// defaultWorkspace keeps plugin state under data/agent, which works for a
+// non-root install and on every platform.
+func (p *AgentPlugin) defaultWorkspace() string {
+	if p.dataDir == "" {
+		return workspaceDirname
+	}
+	return filepath.Join(p.dataDir, workspaceDirname)
+}
+
+// expandHome resolves a leading ~ so an owner typing "~/agent" does not end
+// up with a directory literally named "~".
+func expandHome(path string) string {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	return filepath.Join(home, strings.TrimPrefix(path, "~"))
 }
 
 // ============================================================
@@ -364,6 +507,9 @@ func fieldLine(label, value string) string {
 // editNoPreview edits the command message without a link preview, which
 // ctx.Edit cannot turn off.
 func editNoPreview(ctx *plugin.CommandContext, text string) error {
+	if ctx.Message == nil || ctx.Message.Message == nil || ctx.API == nil {
+		return plugin.ErrNoMessage
+	}
 	peer, err := ctx.ResolvePeer()
 	if err != nil {
 		return err
