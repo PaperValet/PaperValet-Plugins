@@ -656,7 +656,9 @@ func (p *YvluPlugin) postQuote(ctx context.Context, req *quoteRequest) ([]byte, 
 		return nil, "", err
 	}
 	hreq.Header.Set("Content-Type", "application/json")
-	hreq.Header.Set("User-Agent", "PaperValet/yvlu")
+	// The service edge only lets the upstream client's exact UA through
+	// (anything else gets a Cloudflare 403) — mirror the TeleBox source.
+	hreq.Header.Set("User-Agent", "TeleBox/0.2.1")
 	resp, err := p.http.Do(hreq)
 	if err != nil {
 		return nil, "", err
