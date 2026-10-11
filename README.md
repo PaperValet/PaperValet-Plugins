@@ -20,6 +20,7 @@ External plugins for [PaperValet](https://github.com/PaperValet/PaperValet) · [
 | 插件 Plugin | 命令 Command | 作用 | What it does |
 |---|---|---|---|
 | acron | `acron` | Cron 定时发送/转发/复制/删除/置顶/执行命令 | Cron-scheduled send/forward/copy/delete/pin/run-command |
+| agent | `agent` | AI 智能体：下达任务后自动调用工具多步完成，可执行命令与发送文件 | AI agent: works through a task with tools, running commands and sending files |
 | ai | `ai` | AI 对话，可配置模型和提示词 | Chat with an AI, configurable model and prompt |
 | annualreport | `annualreport` | 生成群年度/时段报告：活跃、 Top 发言、时段分布 | Chat stats report: activity, top talkers, hour bins |
 | atadmins | `atadmins` | 一键艾特全部管理员 | Mention every group admin |
