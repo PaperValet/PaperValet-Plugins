@@ -99,6 +99,7 @@ func chatURL(base string) string {
 
 func (p *AgentPlugin) callModel(ctx context.Context, msgs []chatMessage) (chatMessage, int, error) {
 	cfg := p.config()
+	msgs = repairToolCalls(msgs)
 
 	tools := make([]apiTool, 0, len(p.tools))
 	for _, t := range p.tools {
@@ -264,10 +265,16 @@ func (p *AgentPlugin) runTask(chatID int64, msgID int, task string) {
 
 			res := p.runTool(ctx, name, args)
 
+			// finish records the answer, but the loop must still answer every
+			// tool_call in this assistant message: the API rejects a request
+			// whose tool_calls are not all followed by tool results.
 			if name == "finish" {
 				final = res.Output
 				done = true
-				break
+				toolMsg := chatMessage{Role: "tool", ToolCallID: call.ID, Name: name, Content: "done"}
+				msgs = append(msgs, toolMsg)
+				p.appendHistory(chatID, toolMsg)
+				continue
 			}
 
 			if name == "send_file" && res.SendFile != "" {
@@ -466,6 +473,36 @@ func normalizeArgs(raw string) string {
 		return "{}"
 	}
 	return raw
+}
+
+// repairToolCalls guarantees that every tool_call in an assistant message is
+// followed by a matching tool result. A run cut short by a timeout or an error
+// can leave the history half-answered, and providers reject every later
+// request until the gap is filled — so missing results get a placeholder.
+func repairToolCalls(msgs []chatMessage) []chatMessage {
+	out := make([]chatMessage, 0, len(msgs))
+	for i := 0; i < len(msgs); i++ {
+		m := msgs[i]
+		out = append(out, m)
+		if m.Role != "assistant" || len(m.ToolCalls) == 0 {
+			continue
+		}
+		answered := map[string]bool{}
+		for j := i + 1; j < len(msgs) && msgs[j].Role == "tool"; j++ {
+			answered[msgs[j].ToolCallID] = true
+		}
+		for _, tc := range m.ToolCalls {
+			if !answered[tc.ID] {
+				out = append(out, chatMessage{
+					Role:       "tool",
+					ToolCallID: tc.ID,
+					Name:       tc.Function.Name,
+					Content:    "(interrupted, no result)",
+				})
+			}
+		}
+	}
+	return out
 }
 
 func parsePlan(argsJSON string) []planStep {
