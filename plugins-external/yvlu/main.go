@@ -78,7 +78,7 @@ func (p *YvluPlugin) Init(_ context.Context, mgr plugin.Manager) error {
 		Title:   "💬 语录生成",
 		TitleEN: "💬 Quote maker",
 		Settings: []plugin.Setting{{
-			Key: "stickerSet", Label: "贴纸包名称", LabelEN: "Sticker pack name",
+			Key: "sticker_set", Label: "贴纸包名称", LabelEN: "Sticker pack name",
 			Hint:   "yvlu s 保存贴纸的目标贴纸包 shortName，不存在时自动创建；字母开头，仅字母、数字、下划线",
 			HintEN: "Target pack shortName for yvlu s, auto-created when missing; starts with a letter, letters/digits/underscores only",
 			Kind:   plugin.SettingText, Default: "",

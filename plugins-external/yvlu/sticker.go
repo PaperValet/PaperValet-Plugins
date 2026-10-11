@@ -27,7 +27,7 @@ func (p *YvluPlugin) configuredPack(ctx *plugin.CommandContext) string {
 	if p.settings == nil {
 		return ""
 	}
-	return strings.TrimSpace(p.settings.String("stickerSet"))
+	return strings.TrimSpace(p.settings.String("sticker_set"))
 }
 
 // handleSave implements "yvlu s" on a replied sticker or photo message.
