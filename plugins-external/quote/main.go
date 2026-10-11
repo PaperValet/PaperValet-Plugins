@@ -186,7 +186,7 @@ func (p *QuotePlugin) handleQuote(ctx *plugin.CommandContext) error {
 
 	_ = ctx.Edit(ctx.Tlocal("⏳ 正在收集消息…", "⏳ Collecting messages…"))
 
-	msgs, chats, err := p.collectMessages(ctx, args, isReply)
+	msgs, chats, users, err := p.collectMessages(ctx, args, isReply)
 	if err != nil {
 		if d, ok := tgerr.AsFloodWait(err); ok {
 			return ctx.Edit("❌ " + ctx.Tlocal(fmt.Sprintf("触发限流，请 %d 秒后重试", int(d.Seconds())), fmt.Sprintf("Flood wait, retry in %ds", int(d.Seconds()))))
@@ -194,7 +194,7 @@ func (p *QuotePlugin) handleQuote(ctx *plugin.CommandContext) error {
 		return ctx.Edit("❌ " + ctx.Tlocal("获取消息失败: ", "failed to load messages: ") + plugin.Escape(err.Error()))
 	}
 
-	qmsgs := p.buildQuoteMessages(ctx, msgs, chats, args)
+	qmsgs := p.buildQuoteMessages(ctx, msgs, chats, users, args)
 
 	rawMsgs := make([]json.RawMessage, 0, len(qmsgs))
 	for _, qm := range qmsgs {
@@ -337,16 +337,17 @@ func (p *QuotePlugin) sendSticker(ctx *plugin.CommandContext, path string, reply
 
 // collectMessages gathers the messages to quote: the replied message plus
 // (count-1) following ones, or N before the command when not replying.
-// Any chats returned alongside the messages are passed back so channel
-// posts can be attributed to the real channel title.
-func (p *QuotePlugin) collectMessages(ctx *plugin.CommandContext, args quoteArgs, isReply bool) ([]*tg.Message, []tg.ChatClass, error) {
+// The users/chats returned alongside the messages are passed back too —
+// they carry the sender names, access hashes and premium emoji statuses,
+// which a bare users.getUsers retry cannot recover for group senders.
+func (p *QuotePlugin) collectMessages(ctx *plugin.CommandContext, args quoteArgs, isReply bool) ([]*tg.Message, []tg.ChatClass, []tg.UserClass, error) {
 	api := ctx.API
 	if api == nil {
-		return nil, nil, fmt.Errorf("no api")
+		return nil, nil, nil, fmt.Errorf("no api")
 	}
 	peer, err := ctx.ResolvePeer()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	count := args.count
 	if count == 0 {
@@ -355,30 +356,32 @@ func (p *QuotePlugin) collectMessages(ctx *plugin.CommandContext, args quoteArgs
 
 	var anchor *tg.Message
 	var chats []tg.ChatClass
+	var users []tg.UserClass
 	if isReply {
-		msgs, _, c, err := plugin.GetMessages(ctx.Context(), api, peer, ctx.Message.ReplyToID)
+		msgs, u, c, err := plugin.GetMessages(ctx.Context(), api, peer, ctx.Message.ReplyToID)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		chats = c
+		users = u
 		for _, m := range msgs {
 			if m.ID == ctx.Message.ReplyToID {
 				anchor = m
 			}
 		}
 		if anchor == nil {
-			return nil, nil, fmt.Errorf("reply message not found")
+			return nil, nil, nil, fmt.Errorf("reply message not found")
 		}
 	}
 
 	if abs(count) <= 1 {
 		if anchor != nil {
-			return []*tg.Message{anchor}, chats, nil
+			return []*tg.Message{anchor}, chats, users, nil
 		}
 		if ctx.Message != nil && ctx.Message.Message != nil {
-			return []*tg.Message{ctx.Message.Message}, nil, nil
+			return []*tg.Message{ctx.Message.Message}, nil, nil, nil
 		}
-		return nil, nil, fmt.Errorf("no message")
+		return nil, nil, nil, fmt.Errorf("no message")
 	}
 
 	limit := min(abs(count), maxQuoteMessages)
@@ -411,19 +414,19 @@ func (p *QuotePlugin) collectMessages(ctx *plugin.CommandContext, args quoteArgs
 	if innerErr != nil {
 		// fall back to the single anchor/command message
 		if anchor != nil {
-			return []*tg.Message{anchor}, nil, nil
+			return []*tg.Message{anchor}, nil, users, nil
 		}
-		return []*tg.Message{ctx.Message.Message}, nil, nil
+		return []*tg.Message{ctx.Message.Message}, nil, nil, nil
 	}
 
 	var list []*tg.Message
 	switch v := res.(type) {
 	case *tg.MessagesMessages:
-		list, chats = messagesOf(v.Messages), v.Chats
+		list, chats, users = messagesOf(v.Messages), v.Chats, v.Users
 	case *tg.MessagesMessagesSlice:
-		list, chats = messagesOf(v.Messages), v.Chats
+		list, chats, users = messagesOf(v.Messages), v.Chats, v.Users
 	case *tg.MessagesChannelMessages:
-		list, chats = messagesOf(v.Messages), v.Chats
+		list, chats, users = messagesOf(v.Messages), v.Chats, v.Users
 	case *tg.MessagesMessagesNotModified:
 	}
 	sort.Slice(list, func(a, b int) bool { return list[a].ID < list[b].ID })
@@ -449,11 +452,11 @@ func (p *QuotePlugin) collectMessages(ctx *plugin.CommandContext, args quoteArgs
 	}
 	if len(out) == 0 {
 		if anchor != nil {
-			return []*tg.Message{anchor}, chats, nil
+			return []*tg.Message{anchor}, chats, users, nil
 		}
-		return []*tg.Message{ctx.Message.Message}, chats, nil
+		return []*tg.Message{ctx.Message.Message}, chats, users, nil
 	}
-	return out, chats, nil
+	return out, chats, users, nil
 }
 
 func messagesOf(in []tg.MessageClass) []*tg.Message {
@@ -476,11 +479,13 @@ func abs(n int) int {
 // ---------------------------------------------------------------- build
 
 // buildQuoteMessages converts tg messages into the quote-api message model:
-// name, avatar (base64), text + entities, media preview, voice/document/
-// audio rows and reply preview. Field names follow quote-api/generate.js.
-func (p *QuotePlugin) buildQuoteMessages(ctx *plugin.CommandContext, msgs []*tg.Message, chats []tg.ChatClass, args quoteArgs) []*quoteMessage {
+// name, avatar (base64), premium emoji status, text + entities, media
+// preview, voice/document/audio rows and reply preview. Field names follow
+// quote-api/generate.js.
+func (p *QuotePlugin) buildQuoteMessages(ctx *plugin.CommandContext, msgs []*tg.Message, chats []tg.ChatClass, users []tg.UserClass, args quoteArgs) []*quoteMessage {
 	out := make([]*quoteMessage, 0, len(msgs))
-	users := p.fetchUsers(ctx, msgs)
+	umap := p.fillMissingUsers(ctx, msgs, userMapOf(users))
+	emojiBufs := p.fetchCustomEmojiBuffers(ctx, msgs, umap)
 	channels := channelNames(chats)
 	for _, m := range msgs {
 		senderID := plugin.SenderID(m)
@@ -491,7 +496,7 @@ func (p *QuotePlugin) buildQuoteMessages(ctx *plugin.CommandContext, msgs []*tg.
 			MediaCrop:   args.crop,
 		}
 		name := "User"
-		if n := userName(users[senderID]); n != "" {
+		if n := userName(umap[senderID]); n != "" {
 			name = n
 		} else if ch, ok := m.FromID.(*tg.PeerChannel); ok && channels[ch.ChannelID] != "" {
 			// channel posts: real title from the chats in the response
@@ -505,8 +510,13 @@ func (p *QuotePlugin) buildQuoteMessages(ctx *plugin.CommandContext, msgs []*tg.
 		if args.hidden {
 			qm.From = &quoteFrom{ID: senderID, Name: false, FirstName: false}
 		} else {
-			qm.From = &quoteFrom{ID: senderID, Name: name, FirstName: name}
-			if av := p.fetchAvatarBytes(ctx, senderID, users[senderID]); len(av) > 0 {
+			qm.From = &quoteFrom{
+				ID:          senderID,
+				Name:        name,
+				FirstName:   name,
+				EmojiStatus: emojiStatusPayload(umap[senderID], emojiBufs),
+			}
+			if av := p.fetchAvatarBytes(ctx, senderID, umap[senderID]); len(av) > 0 {
 				qm.Avatar = true
 				qm.AvatarBuffer = base64.StdEncoding.EncodeToString(av)
 			}
@@ -560,14 +570,19 @@ func (p *QuotePlugin) buildQuoteMessages(ctx *plugin.CommandContext, msgs []*tg.
 		default:
 			qm.Text = m.Message
 		}
+		// the composer scales mediaCanvas against maxSize; without one the
+		// photo lands at zero size, so mirror the vendor's own default
+		if qm.MediaCanvas != "" && qm.MediaMaxSize == 0 {
+			qm.MediaMaxSize = 512 * args.scale * 2 / 3
+		}
 		qm.Caption = qm.Text
-		qm.Entities = bridgeEntities(m)
+		qm.Entities = bridgeEntities(m, emojiBufs)
 		qm.CaptionEnts = qm.Entities
 
 		// reply preview
 		if args.reply {
 			if hdr, ok := m.ReplyTo.(*tg.MessageReplyHeader); ok && hdr.ReplyToMsgID > 0 {
-				qm.ReplyMessage = p.fetchReplyPreview(ctx, hdr.ReplyToMsgID)
+				qm.ReplyMessage = p.fetchReplyPreview(ctx, hdr.ReplyToMsgID, emojiBufs)
 			}
 		}
 		out = append(out, qm)
@@ -609,8 +624,9 @@ func audioLabel(info *docInfo) string {
 }
 
 // bridgeEntities maps tg entities onto the quote-api entity model (types
-// follow TeleBox convertEntities).
-func bridgeEntities(m *tg.Message) []bridgeEntity {
+// follow TeleBox convertEntities). emojiBufs carries pre-downloaded custom
+// emoji images keyed by document id.
+func bridgeEntities(m *tg.Message, emojiBufs map[int64]string) []bridgeEntity {
 	var out []bridgeEntity
 	for _, e := range m.Entities {
 		be := bridgeEntity{
@@ -623,6 +639,9 @@ func bridgeEntities(m *tg.Message) []bridgeEntity {
 			be.URL = v.URL
 		case *tg.MessageEntityPre:
 			be.Language = v.Language
+		case *tg.MessageEntityCustomEmoji:
+			be.CustomEmojiID = strconv.FormatInt(v.DocumentID, 10)
+			be.CustomEmojiBuffer = emojiBufs[v.DocumentID]
 		}
 		if be.Length > 0 && be.Type != "text" {
 			out = append(out, be)
@@ -757,34 +776,147 @@ func entityLength(e tg.MessageEntityClass) int {
 	return 0
 }
 
-// fetchUsers resolves sender names for all messages in one call.
-func (p *QuotePlugin) fetchUsers(ctx *plugin.CommandContext, msgs []*tg.Message) map[int64]tg.UserClass {
-	out := map[int64]tg.UserClass{}
-	if ctx.API == nil {
-		return out
+// userMapOf keys the user entities that arrived with the messages by id.
+func userMapOf(users []tg.UserClass) map[int64]tg.UserClass {
+	out := make(map[int64]tg.UserClass, len(users))
+	for _, u := range users {
+		if v, ok := u.(*tg.User); ok && v != nil {
+			out[v.ID] = v
+		}
 	}
+	return out
+}
+
+// fillMissingUsers resolves senders the message payloads did not carry.
+// Group/channel history always ships its users, so this only fires for the
+// command message's own sender; hashless users.getUsers calls are exactly
+// what made group quotes render as "User" before, so unknown senders are
+// resolved through the message reference (or InputUserSelf for ourselves).
+func (p *QuotePlugin) fillMissingUsers(ctx *plugin.CommandContext, msgs []*tg.Message, have map[int64]tg.UserClass) map[int64]tg.UserClass {
+	if ctx.API == nil {
+		return have
+	}
+	peer, err := ctx.ResolvePeer()
+	if err != nil {
+		return have
+	}
+	selfID := p.host.SelfID()
 	seen := map[int64]bool{}
-	var ids []tg.InputUserClass
+	for id := range have {
+		seen[id] = true
+	}
+	var (
+		ids         []tg.InputUserClass
+		selfPending bool
+	)
 	for _, m := range msgs {
 		id := plugin.SenderID(m)
 		if id == 0 || seen[id] {
 			continue
 		}
+		if _, isChannel := m.FromID.(*tg.PeerChannel); isChannel {
+			continue // channel posts are named from the chats array
+		}
 		seen[id] = true
-		ids = append(ids, &tg.InputUser{UserID: id})
+		if id == selfID {
+			ids = append(ids, &tg.InputUserSelf{})
+			selfPending = true
+			continue
+		}
+		ids = append(ids, &tg.InputUserFromMessage{Peer: peer, MsgID: m.ID, UserID: id})
 	}
 	if len(ids) == 0 {
-		return out
+		return have
 	}
 	c, cancel := context.WithTimeout(ctx.Context(), 20*time.Second)
 	defer cancel()
-	users, err := ctx.API.UsersGetUsers(c, ids)
+	got, err := ctx.API.UsersGetUsers(c, ids)
+	if err != nil && selfPending {
+		// one stale message reference fails the whole batch — self still works
+		got, err = ctx.API.UsersGetUsers(c, []tg.InputUserClass{&tg.InputUserSelf{}})
+	}
+	if err != nil {
+		return have
+	}
+	for _, u := range got {
+		if v, ok := u.(*tg.User); ok && v != nil {
+			have[v.ID] = v
+		}
+	}
+	return have
+}
+
+// emojiStatusOf returns the custom emoji document id of a user's premium
+// status (0 when none).
+func emojiStatusOf(uc tg.UserClass) int64 {
+	u, ok := uc.(*tg.User)
+	if !ok || u == nil {
+		return 0
+	}
+	switch v := u.EmojiStatus.(type) {
+	case *tg.EmojiStatus:
+		return v.DocumentID
+	case *tg.EmojiStatusCollectible:
+		return v.DocumentID
+	}
+	return 0
+}
+
+// emojiStatusPayload builds the renderer payload for a sender status; nil
+// when the user has none or its image could not be downloaded (a status id
+// without a buffer would render a placeholder glyph instead).
+func emojiStatusPayload(uc tg.UserClass, bufs map[int64]string) *bridgeEmojiStatus {
+	id := emojiStatusOf(uc)
+	if id == 0 {
+		return nil
+	}
+	b64 := bufs[id]
+	if b64 == "" {
+		return nil
+	}
+	return &bridgeEmojiStatus{CustomEmojiID: strconv.FormatInt(id, 10), CustomEmojiBuffer: b64}
+}
+
+// fetchCustomEmojiBuffers downloads static images for every custom emoji the
+// render needs: sender premium statuses and inline custom emoji entities.
+// The node renderer has no Telegram access, so buffers ride in the payload.
+func (p *QuotePlugin) fetchCustomEmojiBuffers(ctx *plugin.CommandContext, msgs []*tg.Message, umap map[int64]tg.UserClass) map[int64]string {
+	out := map[int64]string{}
+	if ctx.API == nil {
+		return out
+	}
+	want := map[int64]bool{}
+	for _, m := range msgs {
+		if id := emojiStatusOf(umap[plugin.SenderID(m)]); id != 0 {
+			want[id] = true
+		}
+		for _, e := range m.Entities {
+			if v, ok := e.(*tg.MessageEntityCustomEmoji); ok && v.DocumentID != 0 {
+				want[v.DocumentID] = true
+			}
+		}
+	}
+	if len(want) == 0 {
+		return out
+	}
+	ids := make([]int64, 0, len(want))
+	for id := range want {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(a, b int) bool { return ids[a] < ids[b] })
+	c, cancel := context.WithTimeout(ctx.Context(), 20*time.Second)
+	defer cancel()
+	docs, err := ctx.API.MessagesGetCustomEmojiDocuments(c, ids)
 	if err != nil {
 		return out
 	}
-	for _, u := range users {
-		if v, ok := u.(*tg.User); ok {
-			out[v.ID] = v
+	for _, d := range docs {
+		doc, ok := d.(*tg.Document)
+		if !ok || doc == nil {
+			continue
+		}
+		if b64 := customEmojiBuffer(ctx.Context(), ctx.API, doc); b64 != "" {
+			out[doc.ID] = b64
 		}
 	}
 	return out
@@ -833,7 +965,7 @@ func (p *QuotePlugin) fetchAvatarBytes(ctx *plugin.CommandContext, userID int64,
 
 // fetchReplyPreview loads name+text of the replied message for the preview
 // block.
-func (p *QuotePlugin) fetchReplyPreview(ctx *plugin.CommandContext, msgID int) *quoteReply {
+func (p *QuotePlugin) fetchReplyPreview(ctx *plugin.CommandContext, msgID int, emojiBufs map[int64]string) *quoteReply {
 	if ctx.API == nil {
 		return nil
 	}
@@ -879,7 +1011,12 @@ func (p *QuotePlugin) fetchReplyPreview(ctx *plugin.CommandContext, msgID int) *
 			Name:     name,
 			Text:     truncVisually(text, 36),
 			Entities: []bridgeEntity{},
-			From:     &quoteFrom{ID: senderID, Name: name, FirstName: name},
+			From: &quoteFrom{
+				ID:          senderID,
+				Name:        name,
+				FirstName:   name,
+				EmojiStatus: emojiStatusPayload(users[senderID], emojiBufs),
+			},
 		}
 		return rp
 	}

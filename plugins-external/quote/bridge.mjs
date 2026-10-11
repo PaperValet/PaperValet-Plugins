@@ -156,6 +156,24 @@ function decodeBase64Images(messages) {
   }
 }
 
+// The vendor composer draws message.mediaCanvas directly (TeleBox hands it a
+// canvas loaded in-process), so a buffer that crossed the JSON bridge must
+// be decoded into an Image first or every media quote dies with
+// "Image or Canvas expected".
+async function bridgeMediaCanvases(messages, vendorRequire) {
+  const targets = (messages || []).filter((m) => m && Buffer.isBuffer(m.mediaCanvas));
+  if (targets.length === 0) return;
+  const { loadImage } = vendorRequire("canvas");
+  for (const m of targets) {
+    try {
+      m.mediaCanvas = await loadImage(m.mediaCanvas);
+    } catch (e) {
+      log(`[quote-bridge] mediaCanvas load failed: ${e.message}`);
+      delete m.mediaCanvas;
+    }
+  }
+}
+
 async function main() {
   const req = readStdinJson();
   // Always absolute: a relative assetsDir would resolve against this
@@ -173,6 +191,8 @@ async function main() {
 
   const vendorRequire = createRequire(path.join(vendorDir, "generate.js"));
   const { generateQuote } = vendorRequire("./generate.js");
+
+  await bridgeMediaCanvases(req.messages, vendorRequire);
 
   const result = await generateQuote({
     messages: req.messages,

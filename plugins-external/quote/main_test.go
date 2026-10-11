@@ -299,7 +299,7 @@ func TestEntityMapping(t *testing.T) {
 			&tg.MessageEntityTextURL{Offset: 5, Length: 4, URL: "https://x"},
 		},
 	}
-	ents := bridgeEntities(m)
+	ents := bridgeEntities(m, nil)
 	if len(ents) != 2 {
 		t.Fatalf("ents = %+v", ents)
 	}
@@ -312,8 +312,57 @@ func TestEntityMapping(t *testing.T) {
 
 	// unmapped entity kinds are dropped, not passed as "text"
 	m2 := &tg.Message{Message: "x", Entities: []tg.MessageEntityClass{&tg.MessageEntityUnknown{}}}
-	if got := bridgeEntities(m2); len(got) != 0 {
+	if got := bridgeEntities(m2, nil); len(got) != 0 {
 		t.Errorf("unknown entity should be dropped: %+v", got)
+	}
+
+	// custom emoji carry their id and pre-downloaded buffer
+	m3 := &tg.Message{Message: "hi", Entities: []tg.MessageEntityClass{
+		&tg.MessageEntityCustomEmoji{Offset: 0, Length: 2, DocumentID: 1234},
+	}}
+	got3 := bridgeEntities(m3, map[int64]string{1234: "aGk="})
+	if len(got3) != 1 || got3[0].Type != "custom_emoji" || got3[0].CustomEmojiID != "1234" || got3[0].CustomEmojiBuffer != "aGk=" {
+		t.Errorf("custom emoji entity = %+v", got3)
+	}
+	// without a buffer the id still rides along but the buffer stays empty
+	got4 := bridgeEntities(m3, nil)
+	if len(got4) != 1 || got4[0].CustomEmojiID != "1234" || got4[0].CustomEmojiBuffer != "" {
+		t.Errorf("custom emoji entity without buffer = %+v", got4)
+	}
+}
+
+func TestEmojiStatusOf(t *testing.T) {
+	if got := emojiStatusOf(nil); got != 0 {
+		t.Errorf("nil user = %d", got)
+	}
+	if got := emojiStatusOf(&tg.User{ID: 1}); got != 0 {
+		t.Errorf("no status = %d", got)
+	}
+	u := &tg.User{ID: 1, EmojiStatus: &tg.EmojiStatus{DocumentID: 42}}
+	if got := emojiStatusOf(u); got != 42 {
+		t.Errorf("status = %d", got)
+	}
+	bufs := map[int64]string{42: "aGk="}
+	pay := emojiStatusPayload(u, bufs)
+	if pay == nil || pay.CustomEmojiID != "42" || pay.CustomEmojiBuffer != "aGk=" {
+		t.Fatalf("payload = %+v", pay)
+	}
+	// a status whose image is missing must not render a placeholder glyph
+	if pay := emojiStatusPayload(u, nil); pay != nil {
+		t.Errorf("missing buffer should drop the status: %+v", pay)
+	}
+	if pay := emojiStatusPayload(&tg.User{ID: 2}, bufs); pay != nil {
+		t.Errorf("statusless user should have no payload: %+v", pay)
+	}
+}
+
+func TestUserMapOf(t *testing.T) {
+	m := userMapOf([]tg.UserClass{&tg.User{ID: 7, FirstName: "A"}, nil, &tg.UserEmpty{}})
+	if len(m) != 1 || m[7] == nil {
+		t.Fatalf("map = %+v", m)
+	}
+	if userName(m[7]) != "A" {
+		t.Errorf("name = %q", userName(m[7]))
 	}
 }
 

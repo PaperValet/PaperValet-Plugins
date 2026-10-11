@@ -7,6 +7,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -302,4 +303,56 @@ func shouldFetchPreview(kind mediaKind, force bool) bool {
 		return force
 	}
 	return false
+}
+
+// bestDocThumb picks the biggest static image thumb of a document (custom
+// emoji ship their still frame as a webp thumb next to the animated webm).
+func bestDocThumb(d *tg.Document) (*tg.InputDocumentFileLocation, int64) {
+	bestType, bestSize := "", -1
+	for _, t := range d.Thumbs {
+		if v, ok := t.(*tg.PhotoSize); ok && v.Size > bestSize {
+			bestType, bestSize = v.Type, v.Size
+		}
+	}
+	if bestType == "" {
+		return nil, 0
+	}
+	return &tg.InputDocumentFileLocation{
+		ID:            d.ID,
+		AccessHash:    d.AccessHash,
+		FileReference: d.FileReference,
+		ThumbSize:     bestType,
+	}, int64(bestSize)
+}
+
+// customEmojiBuffer downloads a static raster for a custom emoji document as
+// base64: the still thumb when present, else the document itself (animated
+// webm reduced to its first frame). "" on failure.
+func customEmojiBuffer(ctx context.Context, api *tg.Client, d *tg.Document) string {
+	if loc, size := bestDocThumb(d); loc != nil {
+		c, cancel := context.WithTimeout(ctx, 15*time.Second)
+		data, err := downloadLocation(c, api, loc, size)
+		cancel()
+		if err == nil && len(data) > 0 {
+			return base64.StdEncoding.EncodeToString(data)
+		}
+	}
+	c, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	data, err := downloadLocation(c, api, &tg.InputDocumentFileLocation{
+		ID:            d.ID,
+		AccessHash:    d.AccessHash,
+		FileReference: d.FileReference,
+	}, d.Size)
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	if strings.Contains(strings.ToLower(d.MimeType), "webm") {
+		png, ferr := ffmpegFirstFrame(ctx, data, ".webm")
+		if ferr != nil {
+			return ""
+		}
+		data = png
+	}
+	return base64.StdEncoding.EncodeToString(data)
 }

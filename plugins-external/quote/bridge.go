@@ -58,10 +58,19 @@ type quoteMessage struct {
 }
 
 type quoteFrom struct {
-	ID        int64    `json:"id"`
-	Name      any      `json:"name"`       // string, or false when hidden
-	FirstName any      `json:"first_name"` // string, or false when hidden
-	Photo     struct{} `json:"photo"`
+	ID          int64              `json:"id"`
+	Name        any                `json:"name"`       // string, or false when hidden
+	FirstName   any                `json:"first_name"` // string, or false when hidden
+	Photo       struct{}           `json:"photo"`
+	EmojiStatus *bridgeEmojiStatus `json:"emoji_status,omitempty"`
+}
+
+// bridgeEmojiStatus is the sender's premium/custom emoji status. The vendor
+// renderer appends a placeholder glyph plus a custom_emoji entity, so the
+// pre-downloaded buffer must ride along or nothing premium shows up.
+type bridgeEmojiStatus struct {
+	CustomEmojiID     string `json:"custom_emoji_id"`
+	CustomEmojiBuffer string `json:"customEmojiBuffer,omitempty"`
 }
 
 type quoteReply struct {
@@ -95,6 +104,10 @@ type bridgeEntity struct {
 	Length   int    `json:"length"`
 	URL      string `json:"url,omitempty"`
 	Language string `json:"language,omitempty"`
+	// custom emoji: id selects the glyph, buffer carries the pre-downloaded
+	// static image (the renderer has no Telegram access of its own)
+	CustomEmojiID     string `json:"custom_emoji_id,omitempty"`
+	CustomEmojiBuffer string `json:"customEmojiBuffer,omitempty"`
 }
 
 // bridgeRequest is the stdin payload for bridge.mjs.
