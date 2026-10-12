@@ -6,8 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gotd/td/tg"
-
 	"github.com/TiaraBasori/PaperValet/pkg/plugin"
 )
 
@@ -154,10 +152,9 @@ func (p *CheckinPlugin) page(c *plugin.BotContext) (*plugin.View, error) {
 	}
 
 	p.mu.Lock()
-	targets := make([]*Target, len(p.cfg.Targets))
-	copy(targets, p.cfg.Targets)
 	next, loc := p.cfg.NextRunAt, p.loc
 	p.mu.Unlock()
+	targets := p.snapshotTargets()
 
 	v := &plugin.View{Text: "✅ **" + tl("签到目标", "Sign-in Targets") + "**  " + fmt.Sprint(len(targets))}
 	if next > 0 {
@@ -186,6 +183,3 @@ func (p *CheckinPlugin) page(c *plugin.BotContext) (*plugin.View, error) {
 	}
 	return v, nil
 }
-
-// tgImports keeps the tg import when nothing else uses it.
-var _ = tg.ReplyInlineMarkup{}

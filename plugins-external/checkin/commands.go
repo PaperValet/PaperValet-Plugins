@@ -11,6 +11,16 @@ import (
 
 const pendingTTL = 10 * time.Minute
 
+// splitArgs returns the subcommand and the remaining arguments. An empty
+// argument list must yield no subcommand and no rest — slicing an empty
+// slice at [1:] panics (the bare `checkin` crash).
+func splitArgs(args []string) (sub string, rest []string) {
+	if len(args) == 0 {
+		return "", nil
+	}
+	return strings.ToLower(args[0]), args[1:]
+}
+
 // handle dispatches `checkin` subcommands.
 func (p *CheckinPlugin) handle(ctx *plugin.CommandContext) error {
 	if ctx.Message == nil || ctx.Message.Message == nil {
@@ -34,11 +44,7 @@ func (p *CheckinPlugin) handle(ctx *plugin.CommandContext) error {
 	}
 
 	tl := ctx.Tlocal
-	sub := ""
-	if len(ctx.Args) > 0 {
-		sub = strings.ToLower(ctx.Args[0])
-	}
-	rest := ctx.Args[1:]
+	sub, rest := splitArgs(ctx.Args)
 	switch sub {
 	case "help":
 		return ctx.Edit(p.helpText(tl))
@@ -94,6 +100,9 @@ func (p *CheckinPlugin) cmdAdd(ctx *plugin.CommandContext, args []string) error 
 	}
 	id, name, target := args[0], args[1], args[2]
 	data, text := parseMatcher(args[3:])
+	if !validTargetID(id) {
+		return ctx.Edit("❌ " + tl("ID 请用 1~24 个字符（面板按钮有长度限制）", "the ID needs 1-24 characters (panel buttons are size-limited)"))
+	}
 	if target[0] != '@' && !chatIDRe.MatchString(target) {
 		return ctx.Edit("❌ " + tl("目标必须是 @用户名 或数字 chat id", "the target must be a @username or a numeric chat id"))
 	}
@@ -154,7 +163,9 @@ func (p *CheckinPlugin) onMessage(ctx context.Context, ev *plugin.MessageEvent, 
 		p.mu.Unlock()
 		return
 	}
-	if ev.IsOut || ev.ReplyToID != pending.promptID || ev.UserID != pending.senderID {
+	// The owner replies from their own account, so the capture is outgoing;
+	// only the prompt and sender must match (same as the source).
+	if ev.ReplyToID != pending.promptID || ev.UserID != pending.senderID {
 		return
 	}
 	tl := func(zh, en string) string { return p.langText(ev.UserID, zh, en) }
@@ -274,25 +285,19 @@ func (p *CheckinPlugin) cmdToggle(ctx *plugin.CommandContext, args []string) err
 
 func (p *CheckinPlugin) cmdList(ctx *plugin.CommandContext) error {
 	tl := ctx.Tlocal
-	p.mu.Lock()
-	targets := make([]*Target, len(p.cfg.Targets))
-	copy(targets, p.cfg.Targets)
-	p.mu.Unlock()
+	targets := p.snapshotTargets()
 	if len(targets) == 0 {
 		return ctx.Edit("📝 " + tl("当前没有签到目标，用 ", "No sign-in targets yet; use ") + plugin.Code("checkin add"))
 	}
 	enabled := 0
 	for _, t := range targets {
-		if t != nil && t.Enabled {
+		if t.Enabled {
 			enabled++
 		}
 	}
 	var b strings.Builder
 	b.WriteString("📝 **" + tl("签到目标", "Sign-in Targets") + "** (" + fmt.Sprint(enabled) + "/" + fmt.Sprint(len(targets)) + " " + tl("启用", "enabled") + ")\n\n")
 	for i, t := range targets {
-		if t == nil {
-			continue
-		}
 		status := "🔴"
 		if t.Enabled {
 			status = "🟢"
@@ -318,21 +323,35 @@ func (p *CheckinPlugin) cmdTest(ctx *plugin.CommandContext, args []string) error
 		return ctx.Edit("❌ " + tl("格式: ", "format: ") + plugin.Code("checkin test <ID>"))
 	}
 	p.mu.Lock()
-	var t *Target
+	if p.running {
+		p.mu.Unlock()
+		return ctx.Edit("⏳ " + tl("签到任务正在执行", "a sign-in run is already in progress"))
+	}
+	var t Target
+	found := false
 	for _, x := range p.cfg.Targets {
-		if x.ID == args[0] {
-			t = x
+		if x != nil && x.ID == args[0] {
+			t = *x
+			found = true
 			break
 		}
 	}
+	if found {
+		p.running = true
+	}
 	p.mu.Unlock()
-	if t == nil {
+	if !found {
 		return ctx.Edit("❌ " + tl("未找到目标: ", "target not found: ") + plugin.Code(args[0]))
 	}
+	defer func() {
+		p.mu.Lock()
+		p.running = false
+		p.mu.Unlock()
+	}()
 	if err := ctx.Edit("🚀 " + tl("正在测试 ", "Testing ") + plugin.Escape(t.Name) + "..."); err != nil {
 		return err
 	}
-	r := p.runSingle(ctx.Context(), *t)
+	r := p.runSingle(ctx.Context(), t)
 	word := tl("测试成功", "test succeeded")
 	if !r.OK {
 		word = tl("测试失败", "test failed")
@@ -348,8 +367,8 @@ func (p *CheckinPlugin) cmdStatus(ctx *plugin.CommandContext) error {
 	loc := p.loc
 	p.mu.Unlock()
 	enabled := 0
-	for _, t := range conf.Targets {
-		if t != nil && t.Enabled {
+	for _, t := range p.snapshotTargets() {
+		if t.Enabled {
 			enabled++
 		}
 	}

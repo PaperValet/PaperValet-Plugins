@@ -22,6 +22,7 @@ type runResult struct {
 
 const (
 	replyTimeout = 10 * time.Second // wait for the target bot's reply
+	historyLimit = 10               // messages scanned per poll
 	sourceAuto   = "auto"
 	sourceManual = "manual"
 )
@@ -123,6 +124,20 @@ func findCallbackData(msg *tg.Message, t *Target) []byte {
 	return nil
 }
 
+// historyRequest builds the poll request. OffsetID must stay 0: it pages
+// BACKWARDS through history, so any non-zero value would only return
+// messages older than the bound and never the bot's reply. MinID keeps the
+// newest messages after minID — the same semantics as the source's
+// getHistory(peer, {minId}).
+func historyRequest(peer tg.InputPeerClass, minID int) *tg.MessagesGetHistoryRequest {
+	return &tg.MessagesGetHistoryRequest{
+		Peer:     peer,
+		OffsetID: 0,
+		MinID:    minID,
+		Limit:    historyLimit,
+	}
+}
+
 // pollHistory polls the target's history after minID until pick hits or the
 // timeout expires, mirroring the TeleBox poll helper.
 func (p *CheckinPlugin) pollHistory(
@@ -138,11 +153,7 @@ func (p *CheckinPlugin) pollHistory(
 			return nil
 		case <-time.After(pollEvery):
 		}
-		res, err := p.api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
-			Peer:     peer,
-			OffsetID: minID,
-			Limit:    10,
-		})
+		res, err := p.api.MessagesGetHistory(ctx, historyRequest(peer, minID))
 		if err != nil {
 			if d, ok := tgerr.AsFloodWait(err); ok {
 				// Respect the flood window instead of hammering the

@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 	_ "time/tzdata"
@@ -427,5 +428,107 @@ func TestDefaultConfig(t *testing.T) {
 	c := defaultConfig()
 	if c.RunTime != "10:00" || c.RunTimeEnd != "11:30" || c.RandomDelay != 0 || len(c.Targets) != 0 {
 		t.Errorf("defaults: %+v", c)
+	}
+}
+
+type fakeSettings map[string]any
+
+func (f fakeSettings) Bool(k string) bool     { v, _ := f[k].(bool); return v }
+func (f fakeSettings) String(k string) string { v, _ := f[k].(string); return v }
+func (f fakeSettings) Int(k string) int       { v, _ := f[k].(int); return v }
+func (f fakeSettings) Set(string, any) error  { return nil }
+
+// TestSplitArgs pins the bare-command crash: slicing an empty Args at [1:]
+// used to panic before the handler could answer.
+func TestSplitArgs(t *testing.T) {
+	sub, rest := splitArgs(nil)
+	if sub != "" || rest != nil {
+		t.Errorf("empty args: %q %v", sub, rest)
+	}
+	sub, rest = splitArgs([]string{})
+	if sub != "" || rest != nil {
+		t.Errorf("empty slice: %q %v", sub, rest)
+	}
+	sub, rest = splitArgs([]string{"ADD", "a", "b c"})
+	if sub != "add" || len(rest) != 2 || rest[1] != "b c" {
+		t.Errorf("args: %q %v", sub, rest)
+	}
+}
+
+func TestHistoryRequestDirection(t *testing.T) {
+	req := historyRequest(&tg.InputPeerUser{UserID: 7, AccessHash: 1}, 41)
+	if req.OffsetID != 0 {
+		t.Errorf("OffsetID must stay 0 so the poll reads the newest messages, got %d", req.OffsetID)
+	}
+	if req.MinID != 41 {
+		t.Errorf("MinID must bound the reply from below, got %d", req.MinID)
+	}
+	if req.Limit != historyLimit {
+		t.Errorf("Limit = %d, want %d", req.Limit, historyLimit)
+	}
+}
+
+func TestWindowValidators(t *testing.T) {
+	if v, err := validWindowTime(" 9:05 "); err != nil || v != "9:05" {
+		t.Errorf("validWindowTime: %q %v", v, err)
+	}
+	if _, err := validWindowTime("25:00"); err == nil {
+		t.Error("invalid start accepted")
+	}
+	if v, err := validWindowEnd(""); err != nil || v != "" {
+		t.Errorf("empty end: %q %v", v, err)
+	}
+	if v, err := validWindowEnd("23:30"); err != nil || v != "23:30" {
+		t.Errorf("valid end: %q %v", v, err)
+	}
+	if _, err := validWindowEnd("abc"); err == nil {
+		t.Error("garbage end accepted")
+	}
+}
+
+func TestApplySettingsLocked(t *testing.T) {
+	p := New()
+	p.dir = t.TempDir()
+	p.set = fakeSettings{"run_time": "9:05", "run_time_end": "23:30", "random_delay": 100}
+	p.mu.Lock()
+	p.applySettingsLocked()
+	p.mu.Unlock()
+	if p.cfg.RunTime != "9:05" || p.cfg.RunTimeEnd != "23:30" {
+		t.Errorf("mirror: %+v", p.cfg)
+	}
+	if p.cfg.RandomDelay != maxDelay {
+		t.Errorf("delay clamp: %d", p.cfg.RandomDelay)
+	}
+	var got config
+	if err := readJSON(configPath(p.dir), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.RunTime != "9:05" || got.RandomDelay != maxDelay {
+		t.Errorf("not persisted: %+v", got)
+	}
+}
+
+func TestApplySettingsLockedDefaults(t *testing.T) {
+	p := New()
+	p.dir = t.TempDir()
+	p.set = fakeSettings{"run_time": "10:00", "run_time_end": "11:30", "random_delay": 0}
+	p.mu.Lock()
+	p.applySettingsLocked()
+	p.mu.Unlock()
+	if p.cfg.RunTime != "10:00" || p.cfg.RunTimeEnd != "11:30" || p.cfg.RandomDelay != 0 {
+		t.Errorf("defaults mirrored: %+v", p.cfg)
+	}
+}
+
+func TestValidTargetID(t *testing.T) {
+	for _, ok := range []string{"storm", "a", "签到1"} {
+		if !validTargetID(ok) {
+			t.Errorf("validTargetID(%q) = false", ok)
+		}
+	}
+	for _, bad := range []string{"", strings.Repeat("x", maxTargetID+1)} {
+		if validTargetID(bad) {
+			t.Errorf("validTargetID(%q) = true", bad)
+		}
 	}
 }

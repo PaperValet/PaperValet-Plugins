@@ -8,8 +8,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-
-	"github.com/gotd/td/tg"
 )
 
 // Target is one sign-in target.
@@ -149,42 +147,4 @@ func parseMatcher(args []string) (data, text string) {
 		return "", strings.TrimSpace(strings.TrimPrefix(raw, "text:"))
 	}
 	return strings.TrimPrefix(raw, "data:"), ""
-}
-
-// refFromPeer persists an InputPeer so restored targets need no resolver.
-type peerRef struct {
-	Type       string `json:"type"` // user|chat|channel|self
-	ID         int64  `json:"id"`
-	AccessHash int64  `json:"access_hash,omitempty"`
-}
-
-func refFromPeer(p tg.InputPeerClass) *peerRef {
-	switch v := p.(type) {
-	case *tg.InputPeerUser:
-		return &peerRef{Type: "user", ID: v.UserID, AccessHash: v.AccessHash}
-	case *tg.InputPeerChat:
-		return &peerRef{Type: "chat", ID: v.ChatID}
-	case *tg.InputPeerChannel:
-		return &peerRef{Type: "channel", ID: v.ChannelID, AccessHash: v.AccessHash}
-	case *tg.InputPeerSelf:
-		return &peerRef{Type: "self"}
-	}
-	return nil
-}
-
-func (r *peerRef) input() tg.InputPeerClass {
-	if r == nil {
-		return nil
-	}
-	switch r.Type {
-	case "user":
-		return &tg.InputPeerUser{UserID: r.ID, AccessHash: r.AccessHash}
-	case "chat":
-		return &tg.InputPeerChat{ChatID: r.ID}
-	case "channel":
-		return &tg.InputPeerChannel{ChannelID: r.ID, AccessHash: r.AccessHash}
-	case "self":
-		return &tg.InputPeerSelf{}
-	}
-	return nil
 }

@@ -20,17 +20,19 @@ import (
 )
 
 const (
-	pollEvery  = time.Second
-	maxTargets = 30
-	tickEvery  = 30 * time.Second
-	maxText    = 3800
+	pollEvery   = time.Second
+	maxTargets  = 30
+	tickEvery   = 30 * time.Second
+	maxText     = 3800
+	maxDelay    = 60 // extra random delay cap, like the source
+	maxTargetID = 24 // panel callback buttons carry "toggle:<id>"
 )
 
 var Metadata = &plugin.PluginMetadata{
 	Name:        "checkin",
 	Description: "每日自动签到",
 	DescEN:      "Daily automatic check-in",
-	Version:     "1.0.0",
+	Version:     "1.1.0",
 	Author:      "PaperValet",
 	MinVersion:  "0.1.0",
 }
@@ -95,19 +97,35 @@ func (p *CheckinPlugin) Init(_ context.Context, mgr plugin.Manager) error {
 				Hint:     "IANA 名称如 Asia/Shanghai，留空用 Asia/Shanghai",
 				HintEN:   "An IANA name like Asia/Shanghai; empty keeps Asia/Shanghai",
 				Validate: validTimezone},
+			{Key: "run_time", Label: "开始时间", LabelEN: "Start time", Kind: plugin.SettingText, Default: "10:00",
+				Hint:     "每天 HH:MM 开始，在窗口内随机执行",
+				HintEN:   "Daily start HH:MM; the run is randomized inside the window",
+				Validate: validWindowTime},
+			{Key: "run_time_end", Label: "结束时间", LabelEN: "End time", Kind: plugin.SettingText, Default: "11:30",
+				Hint:     "HH:MM，早于开始时间表示跨天，留空为固定时刻",
+				HintEN:   "HH:MM; earlier than the start crosses midnight, empty keeps a fixed time",
+				Validate: validWindowEnd},
+			{Key: "random_delay", Label: "额外随机延迟（分钟）", LabelEN: "Extra random delay (min)", Kind: plugin.SettingNumber, Default: 0, Min: 0, Max: maxDelay,
+				Hint:   "到点后再随机等待 0~N 分钟",
+				HintEN: "Wait a random 0~N extra minutes past the planned time"},
 			{Key: "notify", Label: "自动签到后推送汇总", LabelEN: "Push summary after auto runs", Kind: plugin.SettingToggle, Default: true},
 			{Key: "notify_chat", Label: "汇总推送会话", LabelEN: "Summary chat", Kind: plugin.SettingText, Default: "",
 				Hint:     "数字 chat id（如 -1001234567890），留空则推到添加目标时的会话",
 				HintEN:   "Numeric chat id (e.g. -1001234567890); empty pushes to the chat where the last target was added",
 				Validate: validChatID},
 		},
-		// Re-plan when the timezone changes.
+		// Re-plan when the timezone or the run window changes.
 		OnChange: func(key string) {
-			if key == "timezone" {
+			switch key {
+			case "timezone":
 				p.applyZone()
 				p.replan()
-				p.poke()
+			case "run_time", "run_time_end", "random_delay":
+				p.applyWindowSetting()
+			default:
+				return
 			}
+			p.poke()
 		},
 	})
 	if err != nil {
@@ -147,6 +165,7 @@ func (p *CheckinPlugin) Start(ctx context.Context) error {
 		p.mu.Unlock()
 		return fmt.Errorf("checkin: load: %w", err)
 	}
+	p.applySettingsLocked()
 	p.applyZoneLocked()
 	if p.cfg.NextRunAt <= 0 || p.cfg.NextRunDate == "" ||
 		(p.cfg.LastRunDate != "" && p.cfg.NextRunDate <= p.cfg.LastRunDate) {
@@ -326,6 +345,96 @@ func validChatID(s string) (string, error) {
 		return "", plugin.Invalid("请输入数字 chat id（如 -1001234567890）", "expected a numeric chat id (e.g. -1001234567890)")
 	}
 	return s, nil
+}
+
+// validWindowTime validates a window start and normalizes it to HH:MM.
+func validWindowTime(s string) (string, error) {
+	v, ok := normalizeWindowTime(s)
+	if !ok {
+		return "", plugin.Invalid("格式应为 HH:MM，例如 10:00", "expected HH:MM, e.g. 10:00")
+	}
+	return v, nil
+}
+
+// validWindowEnd validates a window end; empty keeps a fixed time.
+func validWindowEnd(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", nil
+	}
+	v, ok := normalizeWindowTime(s)
+	if !ok {
+		return "", plugin.Invalid("格式应为 HH:MM，留空表示固定时刻", "expected HH:MM; empty keeps a fixed time")
+	}
+	return v, nil
+}
+
+func normalizeWindowTime(v string) (string, bool) {
+	min, ok := parseTime(v)
+	if !ok {
+		return "", false
+	}
+	return formatTime(min), true
+}
+
+func normalizeWindowEnd(v string) string {
+	if min, ok := parseTime(strings.TrimSpace(v)); ok {
+		return formatTime(min)
+	}
+	return ""
+}
+
+// validTargetID bounds the id: the panel's callback buttons carry
+// "toggle:<id>" and callback data is size-limited.
+func validTargetID(id string) bool {
+	return id != "" && len(id) <= maxTargetID
+}
+
+// applySettingsLocked mirrors the panel's run window into the config (the
+// panel is the source of truth) and persists when something changed.
+func (p *CheckinPlugin) applySettingsLocked() {
+	if p.set == nil {
+		return
+	}
+	cfg := p.cfg
+	if v, ok := normalizeWindowTime(p.set.String("run_time")); ok {
+		cfg.RunTime = v
+	}
+	cfg.RunTimeEnd = normalizeWindowEnd(p.set.String("run_time_end"))
+	d := p.set.Int("random_delay")
+	if d < 0 {
+		d = 0
+	}
+	if d > maxDelay {
+		d = maxDelay
+	}
+	cfg.RandomDelay = d
+	if cfg.RunTime != p.cfg.RunTime || cfg.RunTimeEnd != p.cfg.RunTimeEnd || cfg.RandomDelay != p.cfg.RandomDelay {
+		p.cfg = cfg
+		_ = p.saveLocked()
+	}
+}
+
+// applyWindowSetting mirrors a changed window setting and re-plans.
+func (p *CheckinPlugin) applyWindowSetting() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.applySettingsLocked()
+	p.rescheduleLocked(time.Now())
+}
+
+// snapshotTargets returns value copies of the targets under the lock so
+// readers never touch a Target a toggle or edit could mutate.
+func (p *CheckinPlugin) snapshotTargets() []Target {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]Target, 0, len(p.cfg.Targets))
+	for _, t := range p.cfg.Targets {
+		if t != nil {
+			out = append(out, *t)
+		}
+	}
+	return out
 }
 
 func truncateRunes(s string, n int) string {
